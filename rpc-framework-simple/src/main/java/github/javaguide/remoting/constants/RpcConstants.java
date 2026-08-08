@@ -16,7 +16,8 @@ public class RpcConstants {
     public static final byte[] MAGIC_NUMBER = {(byte) 'g', (byte) 'r', (byte) 'p', (byte) 'c'};
     public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;
     //version information
-    public static final byte VERSION = 1;
+    // Version 2 introduces the canonical 0-16 RPC status-code contract.
+    public static final byte VERSION = 2;
     public static final byte TOTAL_LENGTH = 16;
     public static final byte REQUEST_TYPE = 1;
     public static final byte RESPONSE_TYPE = 2;

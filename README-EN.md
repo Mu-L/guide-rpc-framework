@@ -26,10 +26,10 @@ If you're going to use the  [guide-rpc-framework](https://github.com/Snailclimb/
 - **Load Balancing**: Includes random and consistent-hash implementations; service discovery uses consistent hashing by default
 - **Spring Integration**: Simplifies service registration and consumption through annotations
 - **Heartbeat Detection**: Supports heartbeat detection mechanism for both client and server
-- **Asynchronous Response Correlation**: Uses CompletableFuture to match requests and responses; the current proxy API remains synchronous
+- **Synchronous and Asynchronous Public APIs**: Keeps the conventional proxy and adds a non-blocking `CompletableFuture<T>` mirror proxy
 - **Service Grouping and Version Control**: Supports service grouping and version management
 - **Timeout Protection**: Both connection and request timeouts are configurable
-- **Explicit Failure Semantics**: Service exceptions return a failure response with the request ID instead of closing the connection
+- **Standard Error Model**: Stable `RpcStatusCode` values and typed exceptions distinguish remote, timeout, cancellation, transport, and protocol failures
 
 ### 📁 Project Structure
 
@@ -240,6 +240,35 @@ public interface HelloService {
 - **Load Balancing**: Includes random and consistent-hash implementations; service discovery currently defaults to consistent hashing
 
 JVM system properties override values from `rpc.properties`. Invalid serializer, compressor, or non-positive timeout values fail fast during client initialization.
+
+### Synchronous and Asynchronous Calls
+
+The conventional proxy preserves the service interface. For a non-blocking public API, define a client-only mirror with the same method name and parameters and a `CompletableFuture<T>` result:
+
+```java
+public interface HelloServiceAsync {
+    CompletableFuture<String> hello(Hello hello);
+}
+
+RpcServiceConfig serviceConfig = RpcServiceConfig.builder()
+        .group("test1")
+        .version("version1")
+        .build();
+
+try (NettyRpcClient transport = new NettyRpcClient()) {
+    RpcClientProxy clientProxy = new RpcClientProxy(transport, serviceConfig);
+    HelloServiceAsync asyncService = clientProxy.getAsyncProxy(
+            HelloServiceAsync.class, HelloService.class);
+    CompletableFuture<String> resultFuture = asyncService.hello(request);
+    resultFuture.thenAccept(System.out::println).join();
+}
+```
+
+The asynchronous proxy returns before service discovery, connection establishment, and the remote response complete. Cancelling the public future propagates cancellation to the transport and removes pending request state. `@RpcReference` currently injects the conventional synchronous proxy; asynchronous mirrors are created explicitly with `RpcClientProxy#getAsyncProxy`.
+
+Responses use stable `RpcStatusCode` values aligned with gRPC canonical status codes. Expected service failures use `RpcServiceException`; clients receive a typed `RpcRemoteException` with the status and request ID. Unexpected server exceptions are logged on the provider and exposed as `INTERNAL` without implementation details.
+
+The wire protocol version is now 2. Version 1 and version 2 peers must not be mixed in the same deployment. See [the CompletableFuture and error model guide](./docs/使用CompletableFuture优化接受服务提供端返回结果.md) for the implementation, cancellation semantics, status table, and test cases.
 
 ### Troubleshooting
 

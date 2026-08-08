@@ -2,7 +2,7 @@ package github.javaguide.provider.impl;
 
 import github.javaguide.config.RpcServiceConfig;
 import github.javaguide.config.RpcServerAddressUtil;
-import github.javaguide.enums.RpcErrorMessageEnum;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.enums.ServiceRegistryEnum;
 import github.javaguide.exception.RpcException;
 import github.javaguide.extension.ExtensionLoader;
@@ -34,7 +34,8 @@ public class ZkServiceProviderImpl implements ServiceProvider {
     public ZkServiceProviderImpl() {
         serviceMap = new ConcurrentHashMap<>();
         registeredService = ConcurrentHashMap.newKeySet();
-        serviceRegistry = ExtensionLoader.getExtensionLoader(ServiceRegistry.class).getExtension(ServiceRegistryEnum.ZK.getName());
+        serviceRegistry = ExtensionLoader.getExtensionLoader(ServiceRegistry.class)
+                .getExtension(ServiceRegistryEnum.ZK.getName());
     }
 
     @Override
@@ -58,7 +59,8 @@ public class ZkServiceProviderImpl implements ServiceProvider {
     public Object getService(String rpcServiceName) {
         Object service = serviceMap.get(rpcServiceName);
         if (null == service) {
-            throw new RpcException(RpcErrorMessageEnum.SERVICE_CAN_NOT_BE_FOUND);
+            throw new RpcException(RpcStatusCode.NOT_FOUND,
+                    "RPC service not found: " + rpcServiceName);
         }
         return service;
     }

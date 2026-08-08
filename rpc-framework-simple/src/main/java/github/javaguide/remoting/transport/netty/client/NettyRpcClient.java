@@ -1,8 +1,7 @@
 package github.javaguide.remoting.transport.netty.client;
 
-
 import github.javaguide.config.RpcClientConfig;
-import github.javaguide.enums.RpcErrorMessageEnum;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.enums.ServiceDiscoveryEnum;
 import github.javaguide.exception.RpcException;
 import github.javaguide.extension.ExtensionLoader;
@@ -14,8 +13,15 @@ import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.transport.RpcRequestTransport;
 import github.javaguide.remoting.transport.netty.codec.RpcMessageCodec;
 import github.javaguide.remoting.transport.netty.codec.RpcMessageFrameDecoder;
+import github.javaguide.utils.RuntimeUtil;
+import github.javaguide.utils.concurrent.threadpool.ThreadPoolFactoryUtil;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.*;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -25,22 +31,27 @@ import io.netty.handler.timeout.IdleStateHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.net.InetSocketAddress;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * initialize and close Bootstrap object
- *
- * @author shuang.kou
- * @createTime 2020年05月29日 17:51:00
- */
+/** Netty RPC client with a non-blocking public request contract. */
 @Slf4j
-public final class NettyRpcClient implements RpcRequestTransport {
+public final class NettyRpcClient implements RpcRequestTransport, AutoCloseable {
+
+    private static final int DISPATCH_QUEUE_CAPACITY = 256;
     private static final AtomicInteger REQUEST_ID_GENERATOR = new AtomicInteger();
 
     private final ServiceDiscovery serviceDiscovery;
@@ -48,7 +59,10 @@ public final class NettyRpcClient implements RpcRequestTransport {
     private final ChannelProvider channelProvider;
     private final Bootstrap bootstrap;
     private final EventLoopGroup eventLoopGroup;
+    private final ExecutorService dispatchExecutor;
     private final RpcClientConfig clientConfig;
+    private final Set<CompletableFuture<RpcResponse<Object>>> activeRequests =
+            ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object lifecycleLock = new Object();
 
@@ -66,148 +80,272 @@ public final class NettyRpcClient implements RpcRequestTransport {
         this.serviceDiscovery = serviceDiscovery;
         this.unprocessedRequests = new UnprocessedRequests();
         this.channelProvider = new ChannelProvider();
-        // initialize resources such as EventLoopGroup, Bootstrap
-        eventLoopGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+        this.eventLoopGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+        this.dispatchExecutor = createDispatchExecutor();
+
         RpcMessageCodec rpcMessageCodec = new RpcMessageCodec();
         bootstrap = new Bootstrap();
         bootstrap.group(eventLoopGroup)
                 .channel(NioSocketChannel.class)
                 .handler(new LoggingHandler(LogLevel.INFO))
-                //  The timeout period of the connection.
-                //  If this time is exceeded or the connection cannot be established, the connection fails.
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS,
                         clientConfig.getConnectTimeoutMillis())
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
-                    protected void initChannel(SocketChannel ch) {
-                        ChannelPipeline p = ch.pipeline();
-                        // If no data is sent to the server within 15 seconds, a heartbeat request is sent
-                        p.addLast(new IdleStateHandler(0, 5, 0, TimeUnit.SECONDS));
-                        // RPCMessageFrame  解码器
-                        p.addLast(new RpcMessageFrameDecoder());
-                        p.addLast(rpcMessageCodec);
-                        p.addLast(new NettyRpcClientHandler(
-                                unprocessedRequests, channelProvider));
+                    protected void initChannel(SocketChannel channel) {
+                        channel.pipeline()
+                                .addLast(new IdleStateHandler(0, 5, 0, TimeUnit.SECONDS))
+                                .addLast(new RpcMessageFrameDecoder())
+                                .addLast(rpcMessageCodec)
+                                .addLast(new NettyRpcClientHandler(
+                                        unprocessedRequests, channelProvider));
                     }
                 });
     }
 
-    /**
-     * connect server and get the channel ,so that you can send rpc message to server
-     *
-     * @param inetSocketAddress server address
-     * @return the channel
-     */
-    public Channel doConnect(InetSocketAddress inetSocketAddress) {
-        CompletableFuture<Channel> completableFuture = new CompletableFuture<>();
-        bootstrap.connect(inetSocketAddress).addListener((ChannelFutureListener) future -> {
+    /** Connects on a dispatcher thread; callers should normally use {@link #sendRpcRequest}. */
+    public Channel doConnect(InetSocketAddress address) {
+        CompletableFuture<Channel> channelFuture = new CompletableFuture<>();
+        bootstrap.connect(address).addListener((ChannelFutureListener) future -> {
             if (future.isSuccess()) {
-                log.info("The client has connected [{}] successful!", inetSocketAddress.toString());
-                completableFuture.complete(future.channel());
+                log.info("Connected to RPC server address={}", address);
+                channelFuture.complete(future.channel());
             } else {
-                completableFuture.completeExceptionally(future.cause());
+                channelFuture.completeExceptionally(future.cause());
             }
         });
         try {
-            return completableFuture.get();
-        } catch (InterruptedException e) {
+            return channelFuture.get();
+        } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw new RpcException("Interrupted while connecting to " + inetSocketAddress, e);
-        } catch (ExecutionException e) {
-            throw new RpcException("Failed to connect to " + inetSocketAddress, e.getCause());
+            throw new RpcException(RpcStatusCode.CANCELLED,
+                    "Interrupted while connecting to " + address, exception);
+        } catch (ExecutionException exception) {
+            throw new RpcException(RpcStatusCode.UNAVAILABLE,
+                    "Failed to connect to " + address, exception.getCause());
         }
     }
 
     @Override
     public CompletableFuture<RpcResponse<Object>> sendRpcRequest(RpcRequest rpcRequest) {
-        if (closed.get()) {
-            throw new RpcException("RPC client is closed");
+        RpcException validationFailure = validateRequest(rpcRequest);
+        if (validationFailure != null) {
+            return CompletableFuture.failedFuture(validationFailure);
         }
-        if (rpcRequest == null || rpcRequest.getRequestId() == null
-                || rpcRequest.getRequestId().trim().isEmpty()) {
-            throw new IllegalArgumentException("RPC request and requestId must not be blank");
+
+        RequestContext context = new RequestContext(rpcRequest);
+        activeRequests.add(context.resultFuture);
+        ScheduledFuture<?> timeoutFuture;
+        try {
+            timeoutFuture = scheduleTimeout(rpcRequest, context);
+        } catch (RejectedExecutionException exception) {
+            activeRequests.remove(context.resultFuture);
+            return CompletableFuture.failedFuture(
+                    clientClosedFailure(rpcRequest, exception));
         }
-        CompletableFuture<RpcResponse<Object>> resultFuture = new CompletableFuture<>();
-        // 1. 获取服务的地址
-        InetSocketAddress inetSocketAddress = serviceDiscovery.lookupService(rpcRequest);
-        // 2. 获取channel
-        Channel channel = getChannel(inetSocketAddress);
-        if (channel.isActive()) {
-            // 3.发送请求
-            RpcMessage rpcMessage = RpcMessage.builder().data(rpcRequest)
-                    .requestId(REQUEST_ID_GENERATOR.incrementAndGet())
-                    .codec(clientConfig.getSerializationCode())
-                    .compress(clientConfig.getCompressCode())
-                    .messageType(RpcConstants.REQUEST_TYPE).build();
-            ScheduledFuture<?> timeoutFuture;
-            synchronized (lifecycleLock) {
-                if (closed.get()) {
-                    channel.close();
-                    throw new RpcException("RPC client is closed");
-                }
-                unprocessedRequests.put(rpcRequest.getRequestId(), resultFuture);
-                timeoutFuture = eventLoopGroup.next().schedule(
-                        () -> resultFuture.completeExceptionally(new RpcException(
-                                "RPC request timed out after "
-                                        + clientConfig.getRequestTimeoutMillis() + " ms: "
-                                        + rpcRequest.getRequestId(),
-                                new TimeoutException(rpcRequest.getRequestId()))),
-                        clientConfig.getRequestTimeoutMillis(), TimeUnit.MILLISECONDS);
-            }
-            ChannelFutureListener closeListener = future -> resultFuture.completeExceptionally(
-                    new RpcException("RPC channel closed before receiving response: "
-                            + rpcRequest.getRequestId()));
-            channel.closeFuture().addListener(closeListener);
-            resultFuture.whenComplete((response, throwable) -> {
-                timeoutFuture.cancel(false);
-                unprocessedRequests.remove(rpcRequest.getRequestId());
-                channel.closeFuture().removeListener(closeListener);
-            });
-            channel.writeAndFlush(rpcMessage).addListener((ChannelFutureListener) future -> {
-                if (future.isSuccess()) {
-                    log.info("Sent RPC request requestId={} wireRequestId={}",
-                            rpcRequest.getRequestId(), rpcMessage.getRequestId());
-                } else {
-                    future.channel().close();
-                    resultFuture.completeExceptionally(future.cause());
-                    log.error("Send failed:", future.cause());
-                }
-            });
-        } else {
-            throw new RpcException(RpcErrorMessageEnum.CLIENT_CONNECT_SERVER_FAILURE,
-                    inetSocketAddress.toString());
-        }
-        return resultFuture;
+        registerCompletionCleanup(rpcRequest, context, timeoutFuture);
+        submitDispatch(rpcRequest, context);
+        return context.resultFuture;
     }
 
-    public Channel getChannel(InetSocketAddress inetSocketAddress) {
-        Channel channel = channelProvider.get(inetSocketAddress);
+    private ScheduledFuture<?> scheduleTimeout(
+            RpcRequest rpcRequest, RequestContext context) {
+        return eventLoopGroup.next().schedule(
+                () -> context.resultFuture.completeExceptionally(
+                        timeoutFailure(rpcRequest)),
+                clientConfig.getRequestTimeoutMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void registerCompletionCleanup(
+            RpcRequest rpcRequest,
+            RequestContext context,
+            ScheduledFuture<?> timeoutFuture) {
+        context.resultFuture.whenComplete((response, throwable) -> {
+            activeRequests.remove(context.resultFuture);
+            timeoutFuture.cancel(false);
+            unprocessedRequests.remove(rpcRequest.getRequestId());
+            Channel channel = context.channelReference.get();
+            if (channel != null) {
+                channel.closeFuture().removeListener(context.closeListener);
+            }
+            Future<?> dispatchTask = context.dispatchReference.get();
+            if (dispatchTask != null && !dispatchTask.isDone()) {
+                dispatchTask.cancel(true);
+            }
+        });
+    }
+
+    private void submitDispatch(RpcRequest rpcRequest, RequestContext context) {
+        try {
+            Future<?> dispatchTask = dispatchExecutor.submit(() -> dispatch(
+                    rpcRequest, context));
+            context.dispatchReference.set(dispatchTask);
+            if (context.resultFuture.isDone()) {
+                dispatchTask.cancel(true);
+            }
+        } catch (RejectedExecutionException exception) {
+            context.resultFuture.completeExceptionally(new RpcException(
+                    closed.get() ? RpcStatusCode.CANCELLED : RpcStatusCode.RESOURCE_EXHAUSTED,
+                    rpcRequest.getRequestId(),
+                    closed.get() ? "RPC client is closed" : "RPC client dispatch queue is full",
+                    exception));
+        }
+    }
+
+    private void dispatch(RpcRequest rpcRequest, RequestContext context) {
+        try {
+            InetSocketAddress address = serviceDiscovery.lookupService(rpcRequest);
+            if (context.resultFuture.isDone()) {
+                return;
+            }
+            Channel channel = getChannel(address);
+            if (context.resultFuture.isDone()) {
+                return;
+            }
+            if (!channel.isActive()) {
+                throw new RpcException(RpcStatusCode.UNAVAILABLE,
+                        rpcRequest.getRequestId(),
+                        "RPC channel is inactive: " + address, null);
+            }
+            context.channelReference.set(channel);
+            channel.closeFuture().addListener(context.closeListener);
+            if (context.resultFuture.isDone()) {
+                channel.closeFuture().removeListener(context.closeListener);
+                return;
+            }
+
+            unprocessedRequests.put(rpcRequest.getRequestId(), context.resultFuture);
+            if (context.resultFuture.isDone()) {
+                unprocessedRequests.remove(rpcRequest.getRequestId());
+                return;
+            }
+            writeRequest(channel, rpcRequest, context.resultFuture);
+        } catch (RuntimeException exception) {
+            context.resultFuture.completeExceptionally(normalizeTransportFailure(
+                    rpcRequest, exception));
+        }
+    }
+
+    private void writeRequest(Channel channel, RpcRequest rpcRequest,
+                              CompletableFuture<RpcResponse<Object>> resultFuture) {
+        RpcMessage rpcMessage = RpcMessage.builder()
+                .data(rpcRequest)
+                .requestId(REQUEST_ID_GENERATOR.incrementAndGet())
+                .codec(clientConfig.getSerializationCode())
+                .compress(clientConfig.getCompressCode())
+                .messageType(RpcConstants.REQUEST_TYPE)
+                .build();
+        channel.writeAndFlush(rpcMessage).addListener((ChannelFutureListener) future -> {
+            if (future.isSuccess()) {
+                log.info("Sent RPC request requestId={} wireRequestId={}",
+                        rpcRequest.getRequestId(), rpcMessage.getRequestId());
+                return;
+            }
+            resultFuture.completeExceptionally(new RpcException(
+                    RpcStatusCode.UNAVAILABLE, rpcRequest.getRequestId(),
+                    "Failed to write RPC request", future.cause()));
+            future.channel().close();
+        });
+    }
+
+    public Channel getChannel(InetSocketAddress address) {
+        Channel channel = channelProvider.get(address);
         if (channel != null) {
             return channel;
         }
         synchronized (channelProvider) {
-            channel = channelProvider.get(inetSocketAddress);
+            channel = channelProvider.get(address);
             if (channel == null) {
-                channel = doConnect(inetSocketAddress);
+                channel = doConnect(address);
                 if (closed.get()) {
                     channel.close();
-                    throw new RpcException("RPC client is closed");
+                    throw clientClosedFailure(null, null);
                 }
-                channelProvider.set(inetSocketAddress, channel);
+                channelProvider.set(address, channel);
             }
             return channel;
         }
     }
 
+    @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        dispatchExecutor.shutdownNow();
+        activeRequests.forEach(requestFuture -> requestFuture.completeExceptionally(
+                new RpcException(RpcStatusCode.CANCELLED, "RPC client is closed")));
         synchronized (lifecycleLock) {
-            channelProvider.closeAll();
             unprocessedRequests.failAll(new RpcException(
-                    "RPC client is closed", new IllegalStateException("client closed")));
+                    RpcStatusCode.CANCELLED, "RPC client is closed"));
+            channelProvider.closeAll();
         }
         eventLoopGroup.shutdownGracefully().syncUninterruptibly();
+    }
+
+    private RpcException validateRequest(RpcRequest rpcRequest) {
+        if (closed.get()) {
+            return clientClosedFailure(rpcRequest, null);
+        }
+        if (rpcRequest == null || rpcRequest.getRequestId() == null
+                || rpcRequest.getRequestId().isBlank()) {
+            return new RpcException(RpcStatusCode.INVALID_ARGUMENT,
+                    "RPC request and requestId must not be blank");
+        }
+        return null;
+    }
+
+    private RpcException timeoutFailure(RpcRequest rpcRequest) {
+        String message = "RPC request timed out after "
+                + clientConfig.getRequestTimeoutMillis() + " ms";
+        return new RpcException(RpcStatusCode.DEADLINE_EXCEEDED,
+                rpcRequest.getRequestId(), message,
+                new TimeoutException(rpcRequest.getRequestId()));
+    }
+
+    private RpcException clientClosedFailure(RpcRequest rpcRequest, Throwable cause) {
+        return new RpcException(RpcStatusCode.CANCELLED,
+                rpcRequest == null ? null : rpcRequest.getRequestId(),
+                "RPC client is closed", cause);
+    }
+
+    private RpcException normalizeTransportFailure(RpcRequest rpcRequest,
+                                                   RuntimeException exception) {
+        if (exception instanceof RpcException rpcException) {
+            return rpcException;
+        }
+        return new RpcException(RpcStatusCode.UNAVAILABLE,
+                rpcRequest.getRequestId(), "RPC transport failed", exception);
+    }
+
+    private static ExecutorService createDispatchExecutor() {
+        int corePoolSize = Math.max(2, Math.min(4, RuntimeUtil.cpus()));
+        int maximumPoolSize = Math.max(corePoolSize, RuntimeUtil.cpus() * 2);
+        return new ThreadPoolExecutor(
+                corePoolSize,
+                maximumPoolSize,
+                60,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(DISPATCH_QUEUE_CAPACITY),
+                ThreadPoolFactoryUtil.createThreadFactory(
+                        "netty-client-dispatch", true),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private static final class RequestContext {
+        private final CompletableFuture<RpcResponse<Object>> resultFuture =
+                new CompletableFuture<>();
+        private final AtomicReference<Channel> channelReference = new AtomicReference<>();
+        private final AtomicReference<Future<?>> dispatchReference = new AtomicReference<>();
+        private final ChannelFutureListener closeListener;
+
+        private RequestContext(RpcRequest rpcRequest) {
+            this.closeListener = future -> resultFuture.completeExceptionally(
+                    new RpcException(
+                            RpcStatusCode.UNAVAILABLE,
+                            rpcRequest.getRequestId(),
+                            "RPC channel closed before receiving a response",
+                            null));
+        }
     }
 }

@@ -1,12 +1,13 @@
 package github.javaguide.remoting.transport.netty.server;
 
-import github.javaguide.enums.RpcResponseCodeEnum;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.remoting.constants.RpcConstants;
 import github.javaguide.remoting.dto.RpcMessage;
 import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.handler.RpcRequestHandler;
+import github.javaguide.remoting.handler.RpcResponseFactory;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -23,13 +24,16 @@ import io.netty.util.concurrent.ImmediateEventExecutor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Customize the ChannelHandler of the server to process the data sent by the client.
  * <p>
- * 如果继承自 SimpleChannelInboundHandler 的话就不要考虑 ByteBuf 的释放 ，{@link SimpleChannelInboundHandler} 内部的
- * channelRead 方法会替你释放 ByteBuf ，避免可能导致的内存泄露问题。详见《Netty进阶之路 跟着案例学 Netty》
+ * 如果继承自 SimpleChannelInboundHandler 的话就不要考虑 ByteBuf 的释放，
+ * {@link SimpleChannelInboundHandler} 内部的 channelRead 方法会替你释放 ByteBuf，
+ * 避免可能导致的内存泄露问题。详见《Netty进阶之路 跟着案例学 Netty》
  *
  * @author shuang.kou
  * @createTime 2020年05月25日 20:44:00
@@ -89,15 +93,24 @@ public class NettyRpcServerHandler extends ChannelInboundHandlerAdapter {
     private void dispatchRequest(ChannelHandlerContext ctx, RpcMessage responseMessage,
                                  RpcRequest rpcRequest) {
         try {
-            serviceExecutor(ctx).execute(() -> {
-                responseMessage.setData(handleRequest(rpcRequest));
-                ctx.writeAndFlush(responseMessage)
-                        .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-            });
+            serviceExecutor(ctx).execute(() -> handleRequest(rpcRequest)
+                    .whenComplete((rpcResponse, throwable) -> {
+                        RpcResponse<Object> response = throwable == null
+                                ? rpcResponse
+                                : failureResponse(rpcRequest, throwable);
+                        responseMessage.setData(response);
+                        ctx.writeAndFlush(responseMessage)
+                                .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                    }));
         } catch (RejectedExecutionException e) {
             log.warn("RPC service executor rejected request requestId={}",
                     rpcRequest == null ? null : rpcRequest.getRequestId(), e);
-            ctx.close();
+            responseMessage.setData(RpcResponse.fail(
+                    RpcStatusCode.RESOURCE_EXHAUSTED,
+                    rpcRequest == null ? null : rpcRequest.getRequestId(),
+                    "RPC service executor is overloaded"));
+            ctx.writeAndFlush(responseMessage)
+                    .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
         }
     }
 
@@ -112,24 +125,45 @@ public class NettyRpcServerHandler extends ChannelInboundHandlerAdapter {
         return existing == null ? selected : existing;
     }
 
-    private RpcResponse<Object> handleRequest(RpcRequest rpcRequest) {
+    private CompletionStage<RpcResponse<Object>> handleRequest(RpcRequest rpcRequest) {
         String requestId = rpcRequest == null ? null : rpcRequest.getRequestId();
         try {
             Object result = rpcRequestHandler.handle(rpcRequest);
-            log.info("Completed RPC request requestId={}", requestId);
-            return RpcResponse.success(result, requestId);
-        } catch (RuntimeException e) {
-            log.error("Remote invocation failed requestId={} service={} method={}",
-                    requestId,
-                    rpcRequest == null ? null : rpcRequest.getInterfaceName(),
-                    rpcRequest == null ? null : rpcRequest.getMethodName(), e);
-            String message = RpcResponseCodeEnum.FAIL.getMessage();
-            if (e.getMessage() != null && !e.getMessage().isEmpty()) {
-                message += ": " + e.getMessage();
+            if (result instanceof CompletionStage<?> resultStage) {
+                return resultStage.handle((value, throwable) -> {
+                    if (throwable != null) {
+                        return failureResponse(rpcRequest, throwable);
+                    }
+                    log.info("Completed asynchronous RPC request requestId={}", requestId);
+                    return RpcResponse.success(value, requestId);
+                });
             }
-            return RpcResponse.fail(RpcResponseCodeEnum.FAIL,
-                    requestId, message);
+            log.info("Completed RPC request requestId={}", requestId);
+            return CompletableFuture.completedFuture(
+                    RpcResponse.success(result, requestId));
+        } catch (RuntimeException exception) {
+            return CompletableFuture.completedFuture(
+                    failureResponse(rpcRequest, exception));
         }
+    }
+
+    private RpcResponse<Object> failureResponse(RpcRequest rpcRequest, Throwable throwable) {
+        String requestId = rpcRequest == null ? null : rpcRequest.getRequestId();
+        RpcStatusCode statusCode = RpcResponseFactory.statusOf(throwable);
+        if (statusCode == RpcStatusCode.INTERNAL
+                || statusCode == RpcStatusCode.UNKNOWN
+                || statusCode == RpcStatusCode.DATA_LOSS) {
+            log.error("RPC invocation failed status={} requestId={} service={} method={}",
+                    statusCode, requestId,
+                    rpcRequest == null ? null : rpcRequest.getInterfaceName(),
+                    rpcRequest == null ? null : rpcRequest.getMethodName(), throwable);
+        } else {
+            log.warn("RPC invocation rejected status={} requestId={} service={} method={}",
+                    statusCode, requestId,
+                    rpcRequest == null ? null : rpcRequest.getInterfaceName(),
+                    rpcRequest == null ? null : rpcRequest.getMethodName());
+        }
+        return RpcResponseFactory.failure(requestId, throwable);
     }
 
     @Override

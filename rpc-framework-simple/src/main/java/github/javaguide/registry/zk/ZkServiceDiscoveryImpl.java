@@ -1,7 +1,7 @@
 package github.javaguide.registry.zk;
 
 import github.javaguide.enums.LoadBalanceEnum;
-import github.javaguide.enums.RpcErrorMessageEnum;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.exception.RpcException;
 import github.javaguide.extension.ExtensionLoader;
 import github.javaguide.loadbalance.LoadBalance;
@@ -26,7 +26,8 @@ public class ZkServiceDiscoveryImpl implements ServiceDiscovery {
     private final LoadBalance loadBalance;
 
     public ZkServiceDiscoveryImpl() {
-        this.loadBalance = ExtensionLoader.getExtensionLoader(LoadBalance.class).getExtension(LoadBalanceEnum.LOADBALANCENEW.getName());
+        this.loadBalance = ExtensionLoader.getExtensionLoader(LoadBalance.class)
+                .getExtension(LoadBalanceEnum.LOADBALANCENEW.getName());
     }
 
     @Override
@@ -35,7 +36,8 @@ public class ZkServiceDiscoveryImpl implements ServiceDiscovery {
         CuratorFramework zkClient = CuratorUtils.getZkClient();
         List<String> serviceUrlList = CuratorUtils.getChildrenNodes(zkClient, rpcServiceName);
         if (CollectionUtil.isEmpty(serviceUrlList)) {
-            throw new RpcException(RpcErrorMessageEnum.SERVICE_CAN_NOT_BE_FOUND, rpcServiceName);
+            throw new RpcException(RpcStatusCode.NOT_FOUND,
+                    "No provider found for RPC service: " + rpcServiceName);
         }
         // load balancing
         String targetServiceUrl = loadBalance.selectServiceAddress(serviceUrlList, rpcRequest);
@@ -64,7 +66,8 @@ public class ZkServiceDiscoveryImpl implements ServiceDiscovery {
     }
 
     private static RpcException invalidServiceAddress(String address, Throwable cause) {
-        return new RpcException("Invalid service address: " + address,
+        return new RpcException(RpcStatusCode.DATA_LOSS,
+                "Invalid service address: " + address,
                 cause == null ? new IllegalArgumentException(String.valueOf(address)) : cause);
     }
 }

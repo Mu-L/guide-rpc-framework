@@ -2,6 +2,7 @@ package github.javaguide.remoting.handler;
 
 import github.javaguide.config.RpcServiceConfig;
 import github.javaguide.exception.RpcException;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.provider.ServiceProvider;
 import github.javaguide.provider.impl.ZkServiceProviderImpl;
@@ -58,7 +59,9 @@ class RpcRequestHandlerTest {
                 .version("")
                 .build();
 
-        assertThrows(RpcException.class, () -> new RpcRequestHandler().handle(request));
+        RpcException exception = assertThrows(
+                RpcException.class, () -> new RpcRequestHandler().handle(request));
+        assertEquals(RpcStatusCode.UNIMPLEMENTED, exception.getStatusCode());
     }
 
     @Test
@@ -81,7 +84,9 @@ class RpcRequestHandlerTest {
                 .version("")
                 .build();
 
-        assertThrows(RpcException.class, () -> new RpcRequestHandler().handle(request));
+        RpcException exception = assertThrows(
+                RpcException.class, () -> new RpcRequestHandler().handle(request));
+        assertEquals(RpcStatusCode.UNIMPLEMENTED, exception.getStatusCode());
     }
 
     public interface NoArgumentService {

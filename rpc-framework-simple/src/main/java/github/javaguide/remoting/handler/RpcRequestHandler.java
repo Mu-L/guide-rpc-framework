@@ -1,6 +1,8 @@
 package github.javaguide.remoting.handler;
 
 import github.javaguide.exception.RpcException;
+import github.javaguide.exception.RpcServiceException;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.provider.ServiceProvider;
 import github.javaguide.provider.impl.ZkServiceProviderImpl;
@@ -10,7 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.Objects;
 
 /**
  * RpcRequest processor
@@ -30,10 +31,15 @@ public class RpcRequestHandler {
      * Processing rpcRequest: call the corresponding method, and then return the method
      */
     public Object handle(RpcRequest rpcRequest) {
-        Objects.requireNonNull(rpcRequest, "rpcRequest cannot be null");
+        if (rpcRequest == null) {
+            throw new RpcException(RpcStatusCode.INVALID_ARGUMENT,
+                    "RPC request cannot be null");
+        }
         if (rpcRequest.getInterfaceName() == null || rpcRequest.getMethodName() == null
                 || rpcRequest.getParamTypes() == null) {
-            throw new RpcException("RPC request is missing interface, method or parameter types");
+            throw new RpcException(RpcStatusCode.INVALID_ARGUMENT,
+                    rpcRequest.getRequestId(),
+                    "RPC request is missing interface, method or parameter types", null);
         }
         Object service = serviceProvider.getService(rpcRequest.getRpcServiceName());
         return invokeTargetMethod(rpcRequest, service);
@@ -52,24 +58,41 @@ public class RpcRequestHandler {
             Class<?> serviceInterface = findServiceInterface(
                     service.getClass(), rpcRequest.getInterfaceName());
             if (serviceInterface == null) {
-                throw new RpcException("Published service does not implement RPC interface "
-                        + rpcRequest.getInterfaceName());
+                throw new RpcException(RpcStatusCode.UNIMPLEMENTED,
+                        rpcRequest.getRequestId(),
+                        "Published service does not implement RPC interface "
+                                + rpcRequest.getInterfaceName(), null);
             }
             Method method = serviceInterface.getMethod(
                     rpcRequest.getMethodName(), rpcRequest.getParamTypes());
             if (Modifier.isStatic(method.getModifiers())) {
-                throw new RpcException("Static interface methods are not RPC operations: "
-                        + rpcRequest.getMethodName());
+                throw new RpcException(RpcStatusCode.UNIMPLEMENTED,
+                        rpcRequest.getRequestId(),
+                        "Static interface methods are not RPC operations: "
+                                + rpcRequest.getMethodName(), null);
             }
             result = method.invoke(service, rpcRequest.getParameters());
-            log.info("service:[{}] successful invoke method:[{}]", rpcRequest.getInterfaceName(), rpcRequest.getMethodName());
+            log.info("Service invocation succeeded service={} method={}",
+                    rpcRequest.getInterfaceName(), rpcRequest.getMethodName());
         } catch (InvocationTargetException e) {
             Throwable targetException = e.getTargetException();
-            throw new RpcException("Service method " + rpcRequest.getMethodName()
-                    + " failed: " + targetException.getMessage(), targetException);
-        } catch (NoSuchMethodException | IllegalArgumentException | IllegalAccessException e) {
-            throw new RpcException("Failed to invoke service method "
-                    + rpcRequest.getMethodName(), e);
+            if (targetException instanceof RpcServiceException rpcServiceException) {
+                throw rpcServiceException;
+            }
+            throw new RpcException(RpcStatusCode.INTERNAL,
+                    rpcRequest.getRequestId(), RpcStatusCode.INTERNAL.getMessage(),
+                    targetException);
+        } catch (NoSuchMethodException e) {
+            throw new RpcException(RpcStatusCode.UNIMPLEMENTED,
+                    rpcRequest.getRequestId(),
+                    "RPC method is not implemented: " + rpcRequest.getMethodName(), e);
+        } catch (IllegalArgumentException e) {
+            throw new RpcException(RpcStatusCode.INVALID_ARGUMENT,
+                    rpcRequest.getRequestId(),
+                    "RPC method arguments do not match: " + rpcRequest.getMethodName(), e);
+        } catch (IllegalAccessException e) {
+            throw new RpcException(RpcStatusCode.INTERNAL,
+                    rpcRequest.getRequestId(), RpcStatusCode.INTERNAL.getMessage(), e);
         }
         return result;
     }

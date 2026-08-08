@@ -2,7 +2,8 @@ package github.javaguide.remoting.transport.netty.server;
 
 import github.javaguide.config.RpcServiceConfig;
 import github.javaguide.enums.CompressTypeEnum;
-import github.javaguide.enums.RpcResponseCodeEnum;
+import github.javaguide.enums.RpcStatusCode;
+import github.javaguide.exception.RpcServiceException;
 import github.javaguide.enums.SerializationTypeEnum;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.provider.ServiceProvider;
@@ -15,6 +16,8 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -44,7 +47,7 @@ class NettyRpcServerHandlerTest {
         assertEquals(SerializationTypeEnum.HESSIAN.getCode(), responseMessage.getCodec());
         assertEquals(CompressTypeEnum.GZIP.getCode(), responseMessage.getCompress());
         assertEquals("failing-request", response.getRequestId());
-        assertEquals(RpcResponseCodeEnum.FAIL.getCode(), response.getCode());
+        assertEquals(RpcStatusCode.INVALID_ARGUMENT.getCode(), response.getCode());
         assertTrue(response.getMessage().contains("teaching failure"));
         assertTrue(channel.isActive());
 
@@ -59,10 +62,22 @@ class NettyRpcServerHandlerTest {
         RpcMessage responseMessage = channel.readOutbound();
         RpcResponse<?> response = (RpcResponse<?>) responseMessage.getData();
 
-        assertEquals(RpcResponseCodeEnum.SUCCESS.getCode(), response.getCode());
+        assertEquals(RpcStatusCode.OK.getCode(), response.getCode());
         assertEquals("null-request", response.getRequestId());
         assertNull(response.getData());
 
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    void shouldComposeAsynchronousServiceResultWithoutSerializingFuture() {
+        EmbeddedChannel channel = new EmbeddedChannel(new NettyRpcServerHandler());
+
+        channel.writeInbound(requestMessage("async-request", "asyncHello"));
+        RpcResponse<?> response = responseFrom(channel);
+
+        assertEquals(RpcStatusCode.OK.getCode(), response.getCode());
+        assertEquals("hello asynchronously", response.getData());
         channel.finishAndReleaseAll();
     }
 
@@ -106,8 +121,20 @@ class NettyRpcServerHandlerTest {
 
         assertEquals(43, responseMessage.getRequestId());
         assertEquals("invalid-request", response.getRequestId());
-        assertEquals(RpcResponseCodeEnum.FAIL.getCode(), response.getCode());
+        assertEquals(RpcStatusCode.INVALID_ARGUMENT.getCode(), response.getCode());
         assertTrue(channel.isActive());
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    void shouldNotExposeUnexpectedServiceExceptionDetails() {
+        EmbeddedChannel channel = new EmbeddedChannel(new NettyRpcServerHandler());
+
+        channel.writeInbound(requestMessage("unexpected-failure", "crash"));
+        RpcResponse<?> response = responseFrom(channel);
+
+        assertEquals(RpcStatusCode.INTERNAL.getCode(), response.getCode());
+        assertEquals(RpcStatusCode.INTERNAL.getMessage(), response.getMessage());
         channel.finishAndReleaseAll();
     }
 
@@ -124,7 +151,7 @@ class NettyRpcServerHandlerTest {
             RpcMessage responseMessage = channel.readOutbound();
             RpcResponse<?> response = (RpcResponse<?>) responseMessage.getData();
             assertEquals("offloaded-request", response.getRequestId());
-            assertEquals(RpcResponseCodeEnum.SUCCESS.getCode(), response.getCode());
+            assertEquals(RpcStatusCode.OK.getCode(), response.getCode());
         } finally {
             channel.finishAndReleaseAll();
             executorGroup.shutdownGracefully().syncUninterruptibly();
@@ -159,13 +186,28 @@ class NettyRpcServerHandlerTest {
     public interface TeachingService {
         String fail();
 
+        String crash();
+
+        CompletableFuture<String> asyncHello();
+
         String returnNull();
     }
 
     public static class TeachingServiceImpl implements TeachingService {
         @Override
         public String fail() {
-            throw new IllegalStateException("teaching failure");
+            throw new RpcServiceException(
+                    RpcStatusCode.INVALID_ARGUMENT, "teaching failure");
+        }
+
+        @Override
+        public String crash() {
+            throw new IllegalStateException("sensitive implementation detail");
+        }
+
+        @Override
+        public CompletableFuture<String> asyncHello() {
+            return CompletableFuture.completedFuture("hello asynchronously");
         }
 
         @Override

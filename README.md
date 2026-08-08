@@ -32,10 +32,10 @@
 - **负载均衡**：提供随机和一致性哈希实现，服务发现默认使用一致性哈希
 - **Spring 集成**：通过注解方式简化服务注册和消费
 - **心跳检测**：支持客户端和服务端的心跳检测机制
-- **异步响应关联**：基于 CompletableFuture 关联请求与响应；当前代理 API 仍为同步调用
+- **同步与异步公开 API**：同步代理保持本地调用体验，异步镜像代理直接返回 `CompletableFuture<T>`
 - **服务分组和版本控制**：支持服务的分组和版本管理
 - **超时保护**：连接超时和请求超时均可配置，超时后自动清理待处理请求
-- **明确的失败语义**：服务端业务异常会返回带 requestId 的失败响应，不会直接断开连接
+- **标准化错误模型**：使用稳定的 `RpcStatusCode`、requestId 和类型化异常区分业务、超时、取消、传输与协议失败
 
 ### 📁 项目结构
 
@@ -91,7 +91,9 @@ guide-rpc-framework/
 - [x] **使用开源的序列化机制 Kryo（也可以用其它的）替代 JDK 自带的序列化机制；**
 - [x] **使用 Zookeeper 管理相关服务地址信息**
 - [x] Netty 重用 Channel 避免重复连接服务端
-- [x] 使用 `CompletableFuture` 包装接受客户端返回结果（之前的实现是通过 `AttributeMap` 绑定到 Channel 上实现的） 详见：[使用 CompletableFuture 优化接受服务提供端返回结果](./docs/使用CompletableFuture优化接受服务提供端返回结果.md)
+- [x] 使用 `CompletableFuture` 包装接收客户端返回结果（之前的实现是通过 `AttributeMap` 绑定到 Channel 上实现的） 详见：[使用 CompletableFuture 实现真正的异步 RPC 调用](./docs/使用CompletableFuture优化接受服务提供端返回结果.md)
+- [x] **提供真正的异步公开 API，并保留兼容的同步代理**
+- [x] **建立标准状态码和类型化异常模型，隐藏未知服务端异常细节**
 - [x] **增加 Netty 心跳机制** : 保证客户端和服务端的连接不被断掉，避免重连。
 - [x] **客户端调用远程服务的时候进行负载均衡** ：调用服务的时候，从很多服务地址中根据相应的负载均衡算法选取一个服务地址。ps：目前实现了随机负载均衡算法与一致性哈希算法。
 - [x] **处理一个接口有多个类实现的情况** ：对服务分组，发布服务的时候增加一个 group 参数即可。
@@ -285,7 +287,34 @@ java -Drpc.request.timeout-millis=3000 -Drpc.serialization=kryo ...
 
 配置值会在客户端初始化时校验；未知序列化/压缩类型以及非正数超时会直接报出对应的配置键，避免运行到第一次远程调用时才失败。
 
-服务实现抛出异常时，服务端会返回携带原始 `requestId` 的失败响应。客户端代理据此抛出 `RpcException`，连接仍可用于后续请求。协议损坏、连接失败等传输层错误才会关闭 Channel。
+### 同步、异步调用与错误处理
+
+原有同步接口继续通过 `getProxy(HelloService.class)` 创建。异步调用定义一个方法名和参数相同、返回 `CompletableFuture<T>` 的客户端镜像接口。`group` 和 `version` 必须与服务提供方一致：
+
+```java
+public interface HelloServiceAsync {
+    CompletableFuture<String> hello(Hello hello);
+}
+
+RpcServiceConfig serviceConfig = RpcServiceConfig.builder()
+        .group("test1")
+        .version("version1")
+        .build();
+
+try (NettyRpcClient transport = new NettyRpcClient()) {
+    RpcClientProxy clientProxy = new RpcClientProxy(transport, serviceConfig);
+    HelloServiceAsync asyncService = clientProxy.getAsyncProxy(
+            HelloServiceAsync.class, HelloService.class);
+    CompletableFuture<String> resultFuture = asyncService.hello(request);
+    resultFuture.thenAccept(System.out::println).join();
+}
+```
+
+异步代理不会在调用线程中等待服务发现、建连或响应。同步和异步 API 共享同一套发送、超时、请求关联和错误映射逻辑；取消公开 Future 也会取消传输 Future 并清理待处理请求。
+
+响应使用与 gRPC canonical status code 对齐的 `RpcStatusCode`。服务实现通过 `RpcServiceException` 表达可以安全返回的预期失败；客户端收到远端失败后抛出带状态码和 requestId 的 `RpcRemoteException`。未知服务端异常只记录完整服务端日志，客户端统一收到 `INTERNAL`，不会泄露底层异常消息。当前 `@RpcReference` 仍注入同步代理，异步镜像通过 `RpcClientProxy#getAsyncProxy` 显式创建。
+
+协议版本已升级为 2，版本 1 与版本 2 的客户端、服务端不能混合部署。实现过程、取消语义、完整状态码表和测试要点见：[使用 CompletableFuture 实现真正的异步 RPC 调用](./docs/使用CompletableFuture优化接受服务提供端返回结果.md)。
 
 ## 相关问题
 

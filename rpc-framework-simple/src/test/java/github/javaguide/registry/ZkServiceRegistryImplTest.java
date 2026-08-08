@@ -49,7 +49,9 @@ class ZkServiceRegistryImplTest {
         System.clearProperty(ZOOKEEPER_ADDRESS_PROPERTY);
         System.clearProperty(ZOOKEEPER_CONNECTION_TIMEOUT_PROPERTY);
         System.clearProperty(ZOOKEEPER_SESSION_TIMEOUT_PROPERTY);
-        testingServer.close();
+        if (testingServer != null) {
+            testingServer.close();
+        }
     }
 
     @Test

@@ -1,6 +1,6 @@
 package github.javaguide.config;
 
-import github.javaguide.enums.RpcErrorMessageEnum;
+import github.javaguide.enums.RpcStatusCode;
 import github.javaguide.exception.RpcException;
 import github.javaguide.utils.StringUtil;
 import github.javaguide.utils.RpcServiceNameBuilder;
@@ -52,7 +52,8 @@ public class RpcServiceConfig {
         Object targetService = Objects.requireNonNull(service, "service cannot be null");
         Class<?>[] interfaces = targetService.getClass().getInterfaces();
         if (interfaces.length == 0) {
-            throw new RpcException(RpcErrorMessageEnum.SERVICE_NOT_IMPLEMENT_ANY_INTERFACE);
+            throw new RpcException(RpcStatusCode.FAILED_PRECONDITION,
+                    "Registered RPC service must implement an interface");
         }
         return interfaces[0].getCanonicalName();
     }

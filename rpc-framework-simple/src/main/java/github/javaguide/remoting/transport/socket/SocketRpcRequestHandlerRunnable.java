@@ -1,16 +1,17 @@
 package github.javaguide.remoting.transport.socket;
 
 import github.javaguide.factory.SingletonFactory;
-import github.javaguide.enums.RpcResponseCodeEnum;
 import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.handler.RpcRequestHandler;
+import github.javaguide.remoting.handler.RpcResponseFactory;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
+import java.util.concurrent.CompletionStage;
 
 /**
  * @author shuang.kou
@@ -38,18 +39,16 @@ public class SocketRpcRequestHandlerRunnable implements Runnable {
             RpcResponse<Object> rpcResponse;
             try {
                 Object result = rpcRequestHandler.handle(rpcRequest);
+                if (result instanceof CompletionStage<?> resultStage) {
+                    result = resultStage.toCompletableFuture().join();
+                }
                 rpcResponse = RpcResponse.success(result, requestId);
             } catch (RuntimeException e) {
                 log.error("Remote invocation failed requestId={} service={} method={}",
                         requestId,
                         rpcRequest == null ? null : rpcRequest.getInterfaceName(),
                         rpcRequest == null ? null : rpcRequest.getMethodName(), e);
-                String message = RpcResponseCodeEnum.FAIL.getMessage();
-                if (e.getMessage() != null && !e.getMessage().isEmpty()) {
-                    message += ": " + e.getMessage();
-                }
-                rpcResponse = RpcResponse.fail(RpcResponseCodeEnum.FAIL,
-                        requestId, message);
+                rpcResponse = RpcResponseFactory.failure(requestId, e);
             }
             objectOutputStream.writeObject(rpcResponse);
             objectOutputStream.flush();

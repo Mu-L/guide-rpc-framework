@@ -1,6 +1,7 @@
 package github.javaguide.remoting.dto;
 
 import github.javaguide.enums.RpcResponseCodeEnum;
+import github.javaguide.enums.RpcStatusCode;
 import lombok.*;
 
 import java.io.Serializable;
@@ -34,23 +35,46 @@ public class RpcResponse<T> implements Serializable {
 
     public static <T> RpcResponse<T> success(T data, String requestId) {
         RpcResponse<T> response = new RpcResponse<>();
-        response.setCode(RpcResponseCodeEnum.SUCCESS.getCode());
-        response.setMessage(RpcResponseCodeEnum.SUCCESS.getMessage());
+        response.setCode(RpcStatusCode.OK.getCode());
+        response.setMessage(RpcStatusCode.OK.getMessage());
         response.setRequestId(requestId);
-        if (null != data) {
-            response.setData(data);
-        }
+        response.setData(data);
         return response;
     }
 
+    /** @deprecated use {@link #fail(RpcStatusCode)}. */
+    @Deprecated
     public static <T> RpcResponse<T> fail(RpcResponseCodeEnum rpcResponseCodeEnum) {
         return fail(rpcResponseCodeEnum, null, rpcResponseCodeEnum.getMessage());
     }
 
+    /** @deprecated use {@link #fail(RpcStatusCode, String, String)}. */
+    @Deprecated
     public static <T> RpcResponse<T> fail(RpcResponseCodeEnum rpcResponseCodeEnum,
                                           String requestId, String message) {
+        return buildFailure(rpcResponseCodeEnum.getCode(), requestId, message);
+    }
+
+    public static <T> RpcResponse<T> fail(RpcStatusCode statusCode) {
+        return fail(statusCode, null, statusCode.getMessage());
+    }
+
+    public static <T> RpcResponse<T> fail(RpcStatusCode statusCode,
+                                          String requestId, String message) {
+        if (statusCode == null || statusCode == RpcStatusCode.OK) {
+            throw new IllegalArgumentException("Failure response requires a failure status");
+        }
+        return buildFailure(statusCode.getCode(), requestId, message);
+    }
+
+    public boolean isSuccess() {
+        return Integer.valueOf(RpcStatusCode.OK.getCode()).equals(code);
+    }
+
+    private static <T> RpcResponse<T> buildFailure(int code,
+                                                   String requestId, String message) {
         RpcResponse<T> response = new RpcResponse<>();
-        response.setCode(rpcResponseCodeEnum.getCode());
+        response.setCode(code);
         response.setMessage(message);
         response.setRequestId(requestId);
         return response;

@@ -13,8 +13,12 @@ import lombok.ToString;
 @ToString
 public enum RpcResponseCodeEnum {
 
-    SUCCESS(200, "The remote call is successful"),
-    FAIL(500, "The remote call is fail");
+    /** @deprecated use {@link RpcStatusCode#OK}. */
+    @Deprecated
+    SUCCESS(RpcStatusCode.OK.getCode(), RpcStatusCode.OK.getMessage()),
+    /** @deprecated use a specific {@link RpcStatusCode}; generic failures map to INTERNAL. */
+    @Deprecated
+    FAIL(RpcStatusCode.INTERNAL.getCode(), RpcStatusCode.INTERNAL.getMessage());
     private final int code;
 
     private final String message;

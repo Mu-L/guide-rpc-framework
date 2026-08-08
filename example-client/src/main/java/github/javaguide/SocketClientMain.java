@@ -2,7 +2,6 @@ package github.javaguide;
 
 import github.javaguide.config.RpcServiceConfig;
 import github.javaguide.proxy.RpcClientProxy;
-import github.javaguide.remoting.transport.RpcRequestTransport;
 import github.javaguide.remoting.transport.socket.SocketRpcClient;
 
 /**
@@ -11,11 +10,18 @@ import github.javaguide.remoting.transport.socket.SocketRpcClient;
  */
 public class SocketClientMain {
     public static void main(String[] args) {
-        RpcRequestTransport rpcRequestTransport = new SocketRpcClient();
-        RpcServiceConfig rpcServiceConfig = new RpcServiceConfig();
-        RpcClientProxy rpcClientProxy = new RpcClientProxy(rpcRequestTransport, rpcServiceConfig);
-        HelloService helloService = rpcClientProxy.getProxy(HelloService.class);
-        String hello = helloService.hello(new Hello("111", "222"));
-        System.out.println(hello);
+        RpcServiceConfig serviceConfig = new RpcServiceConfig();
+        try (SocketRpcClient transport = new SocketRpcClient()) {
+            RpcClientProxy clientProxy = new RpcClientProxy(transport, serviceConfig);
+
+            HelloService helloService = clientProxy.getProxy(HelloService.class);
+            System.out.println(helloService.hello(new Hello("sync", "synchronous call")));
+
+            HelloServiceAsync asyncService = clientProxy.getAsyncProxy(
+                    HelloServiceAsync.class, HelloService.class);
+            asyncService.hello(new Hello("async", "non-blocking call"))
+                    .thenAccept(System.out::println)
+                    .join();
+        }
     }
 }
