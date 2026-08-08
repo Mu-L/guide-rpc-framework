@@ -2,6 +2,8 @@ package github.javaguide.provider;
 
 import github.javaguide.config.RpcServiceConfig;
 
+import java.net.InetSocketAddress;
+
 /**
  * store and provide service object.
  *
@@ -25,5 +27,10 @@ public interface ServiceProvider {
      * @param rpcServiceConfig rpc service related attributes
      */
     void publishService(RpcServiceConfig rpcServiceConfig);
+
+    /**
+     * Publishes all locally registered services after the server has bound its listening socket.
+     */
+    void publishAllServices(InetSocketAddress serverAddress);
 
 }

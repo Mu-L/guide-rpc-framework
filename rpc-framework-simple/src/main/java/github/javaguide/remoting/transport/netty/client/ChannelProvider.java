@@ -16,35 +16,36 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class ChannelProvider {
 
-    private final Map<String, Channel> channelMap;
+    private final Map<InetSocketAddress, Channel> channelMap;
 
     public ChannelProvider() {
         channelMap = new ConcurrentHashMap<>();
     }
 
     public Channel get(InetSocketAddress inetSocketAddress) {
-        String key = inetSocketAddress.toString();
-        // determine if there is a connection for the corresponding address
-        if (channelMap.containsKey(key)) {
-            Channel channel = channelMap.get(key);
-            // if so, determine if the connection is available, and if so, get it directly
-            if (channel != null && channel.isActive()) {
-                return channel;
-            } else {
-                channelMap.remove(key);
-            }
+        Channel channel = channelMap.get(inetSocketAddress);
+        if (channel != null && channel.isActive()) {
+            return channel;
+        }
+        if (channel != null) {
+            channelMap.remove(inetSocketAddress, channel);
         }
         return null;
     }
 
     public void set(InetSocketAddress inetSocketAddress, Channel channel) {
-        String key = inetSocketAddress.toString();
-        channelMap.put(key, channel);
+        channelMap.put(inetSocketAddress, channel);
     }
 
-    public void remove(InetSocketAddress inetSocketAddress) {
-        String key = inetSocketAddress.toString();
-        channelMap.remove(key);
+    public void remove(InetSocketAddress inetSocketAddress, Channel channel) {
+        // An inactive event from an old connection must not evict a newer connection that was
+        // installed for the same server address during reconnect.
+        channelMap.remove(inetSocketAddress, channel);
         log.info("Channel map size :[{}]", channelMap.size());
+    }
+
+    public void closeAll() {
+        channelMap.forEach((address, channel) -> channel.close());
+        channelMap.clear();
     }
 }

@@ -15,7 +15,10 @@ import java.lang.annotation.Annotation;
 public class CustomScanner extends ClassPathBeanDefinitionScanner {
 
     public CustomScanner(BeanDefinitionRegistry registry, Class<? extends Annotation> annoType) {
-        super(registry);
+        // Disable Spring's default component filters so each scanner only processes the
+        // annotation it was created for. Otherwise the RpcService scanner also discovers every
+        // regular @Component and overlaps with the framework component scanner.
+        super(registry, false);
         super.addIncludeFilter(new AnnotationTypeFilter(annoType));
     }
 

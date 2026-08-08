@@ -16,18 +16,20 @@ If you're going to use the  [guide-rpc-framework](https://github.com/Snailclimb/
 
 ##  Introduction
 
- [guide-rpc-framework](https://github.com/Snailclimb/guide-rpc-framework) is an RPC framework based on Netty+Kyro+Zookeeper. Detailed code comments, clear structure make it ideal for reading and learning.
+ [guide-rpc-framework](https://github.com/Snailclimb/guide-rpc-framework) is an RPC framework based on Netty, ZooKeeper, and pluggable serializers. Detailed code comments and a clear structure make it ideal for reading and learning.
 
 ### 🚀 Project Features
 
 - **High-Performance Network Communication**: Based on Netty for high-performance network transmission
 - **Multiple Serialization Methods**: Supports Kryo, Protostuff, Hessian and other serialization frameworks
 - **Service Registration and Discovery**: Integrated with Zookeeper as registry center
-- **Load Balancing**: Supports multiple load balancing strategies (random, round-robin, etc.)
+- **Load Balancing**: Includes random and consistent-hash implementations; service discovery uses consistent hashing by default
 - **Spring Integration**: Simplifies service registration and consumption through annotations
 - **Heartbeat Detection**: Supports heartbeat detection mechanism for both client and server
-- **Asynchronous Calls**: Implements asynchronous calls based on CompletableFuture
+- **Asynchronous Response Correlation**: Uses CompletableFuture to match requests and responses; the current proxy API remains synchronous
 - **Service Grouping and Version Control**: Supports service grouping and version management
+- **Timeout Protection**: Both connection and request timeouts are configurable
+- **Explicit Failure Semantics**: Service exceptions return a failure response with the request ID instead of closing the connection
 
 ### 📁 Project Structure
 
@@ -66,7 +68,7 @@ As a leader in the field of RPC framework [Dubbo](https://github.com/apache/dubb
 
 1. **Registration Center**: The registration center is required first, and Zookeeper is recommended. The registration center is responsible for the registration and search of service addresses, which is equivalent to a directory service. When the server starts, the service name and its corresponding address (ip+port) are registered in the registry, and the service consumer finds the corresponding service address according to the service name. With the service address, the service consumer can request the server through the network.
 2. **Network Transmission**: Since you want to call a remote method, you must send a request. The request must at least include the class name, method name, and related parameters you call! Recommend the Netty framework based on NIO.
-3. **Serialization**: Since network transmission is involved, serialization must be involved. You can't directly use the serialization that comes with JDK! The serialization that comes with the JDK is inefficient and has security vulnerabilities. Therefore, you have to consider which serialization protocol to use. The more commonly used ones are hession2, kyro, and protostuff.
+3. **Serialization**: Since network transmission is involved, serialization must be involved. You can't directly use the serialization that comes with JDK! The serialization that comes with the JDK is inefficient and has security vulnerabilities. Therefore, you have to consider which serialization protocol to use. The more commonly used ones are hession2, kryo, and protostuff.
 4. **Dynamic Proxy**: In addition, a dynamic proxy is also required. Because the main purpose of RPC is to allow us to call remote methods as easy as calling local methods, the use of dynamic proxy can shield the details of remote method calls such as network transmission. That is to say, when you call a remote method, the network request will actually be transmitted through the proxy object. Otherwise, how could it be possible to call the remote method directly?
 2. **Load Balancing**: Load balancing is also required. Why? For example, a certain service in our system has very high traffic. We deploy this service on multiple servers. When a client initiates a request, multiple servers can handle the request. Then, how to correctly select the server that processes the request is critical. If you need one server to handle requests for the service, the meaning of deploying the service on multiple servers no longer exists. Load balancing is to avoid a single server responding to the same request, which is likely to cause server downtime, crashes and other problems. We can clearly feel its meaning from the four words of load balancing.
 
@@ -90,9 +92,9 @@ As a leader in the field of RPC framework [Dubbo](https://github.com/apache/dubb
 
 ### Environment Requirements
 
-- **JDK**: 1.8+
-- **Maven**: 3.6+
-- **Zookeeper**: 3.5+ (as registry center)
+- **JDK**: 25+
+- **Maven**: 3.9+
+- **Zookeeper**: 3.9.5+ (as registry center)
 - **IDE**: IntelliJ IDEA (recommended)
 
 ### Quick Start
@@ -101,8 +103,8 @@ As a leader in the field of RPC framework [Dubbo](https://github.com/apache/dubb
 
    Using Docker to download and run:
    ```bash
-   docker pull zookeeper:3.5.8
-   docker run -d --name zookeeper -p 2181:2181 zookeeper:3.5.8
+   docker pull zookeeper:3.9.5
+   docker run -d --name zookeeper -p 2181:2181 zookeeper:3.9.5
    ```
 
 2. **Clone and Build Project**
@@ -156,10 +158,10 @@ public interface HelloService {
    @RpcScan(basePackage = {"github.javaguide.serviceimpl"})
    public class NettyServerMain {
        public static void main(String[] args) {
-           // Register service via annotation
-           new AnnotationConfigApplicationContext(NettyServerMain.class);
-           NettyRpcServer nettyRpcServer = new NettyRpcServer();
-           nettyRpcServer.start();
+           try (AnnotationConfigApplicationContext context =
+                        new AnnotationConfigApplicationContext(NettyServerMain.class)) {
+               context.getBean(NettyRpcServer.class).start();
+           }
        }
    }
    ```
@@ -188,9 +190,11 @@ public interface HelloService {
    @RpcScan(basePackage = {"github.javaguide"})
    public class NettyClientMain {
        public static void main(String[] args) throws InterruptedException {
-           AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(NettyClientMain.class);
-           HelloController helloController = (HelloController) applicationContext.getBean("helloController");
-           helloController.test();
+           try (AnnotationConfigApplicationContext applicationContext =
+                        new AnnotationConfigApplicationContext(NettyClientMain.class)) {
+               HelloController helloController = applicationContext.getBean(HelloController.class);
+               helloController.test();
+           }
        }
    }
    ```
@@ -199,7 +203,7 @@ public interface HelloService {
 
 1. **Start Zookeeper**
    ```bash
-   docker run -d --name zookeeper -p 2181:2181 zookeeper:3.5.8
+   docker run -d --name zookeeper -p 2181:2181 zookeeper:3.9.5
    ```
    Ensure Zookeeper is running on `127.0.0.1:2181`
 
@@ -224,10 +228,18 @@ public interface HelloService {
 
 ### Configuration
 
-- **Registry Center**: Default uses Zookeeper, address: `127.0.0.1:2181`
-- **Serialization**: Default uses Kryo serialization
+- **Registry Center**: Configure with `rpc.zookeeper.address`; defaults to `127.0.0.1:2181`
+- **ZooKeeper Timeouts**: Configure with `rpc.zookeeper.connection-timeout-millis` and `rpc.zookeeper.session-timeout-millis`; defaults to `15000` ms and `60000` ms
+- **Server Address**: `rpc.server.bind-host` controls the local listening address (default `0.0.0.0`); `rpc.server.host` is the reachable address advertised through ZooKeeper and must not be a wildcard
+- **Service Identity**: Registry keys contain the interface name plus URL-safe Base64 encoded `group` and `version`, preventing field-boundary collisions and ZooKeeper path injection; providers and consumers in an existing deployment must be upgraded together
+- **Serialization**: Configure with `rpc.serialization`; supports `kryo`, `protostuff`, and `hessian`, default `hessian`
+- **Compression**: Configure with `rpc.compress`; currently supports `gzip`
+- **Connection Timeout**: Configure with `rpc.connect.timeout-millis`, default `5000` ms
+- **Request Timeout**: Configure with `rpc.request.timeout-millis`, default `10000` ms
 - **Transport Protocol**: Default uses Netty for network communication
-- **Load Balancing**: Default uses random load balancing strategy
+- **Load Balancing**: Includes random and consistent-hash implementations; service discovery currently defaults to consistent hashing
+
+JVM system properties override values from `rpc.properties`. Invalid serializer, compressor, or non-positive timeout values fail fast during client initialization.
 
 ### Troubleshooting
 

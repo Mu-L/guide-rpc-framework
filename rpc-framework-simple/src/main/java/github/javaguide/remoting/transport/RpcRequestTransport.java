@@ -15,7 +15,9 @@ public interface RpcRequestTransport {
      * send rpc request to server and get result
      *
      * @param rpcRequest message body
-     * @return data from server
+     * @return a transport-specific result: the Socket implementation returns an
+     * {@code RpcResponse}, while the Netty implementation returns a
+     * {@code CompletableFuture<RpcResponse<Object>>}
      */
     Object sendRpcRequest(RpcRequest rpcRequest);
 }

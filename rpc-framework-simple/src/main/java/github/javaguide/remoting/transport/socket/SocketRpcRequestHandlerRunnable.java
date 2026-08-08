@@ -1,6 +1,7 @@
 package github.javaguide.remoting.transport.socket;
 
 import github.javaguide.factory.SingletonFactory;
+import github.javaguide.enums.RpcResponseCodeEnum;
 import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.handler.RpcRequestHandler;
@@ -29,11 +30,28 @@ public class SocketRpcRequestHandlerRunnable implements Runnable {
     @Override
     public void run() {
         log.info("server handle message from client by thread: [{}]", Thread.currentThread().getName());
-        try (ObjectInputStream objectInputStream = new ObjectInputStream(socket.getInputStream());
+        try (Socket clientSocket = socket;
+             ObjectInputStream objectInputStream = new ObjectInputStream(clientSocket.getInputStream());
              ObjectOutputStream objectOutputStream = new ObjectOutputStream(socket.getOutputStream())) {
             RpcRequest rpcRequest = (RpcRequest) objectInputStream.readObject();
-            Object result = rpcRequestHandler.handle(rpcRequest);
-            objectOutputStream.writeObject(RpcResponse.success(result, rpcRequest.getRequestId()));
+            String requestId = rpcRequest == null ? null : rpcRequest.getRequestId();
+            RpcResponse<Object> rpcResponse;
+            try {
+                Object result = rpcRequestHandler.handle(rpcRequest);
+                rpcResponse = RpcResponse.success(result, requestId);
+            } catch (RuntimeException e) {
+                log.error("Remote invocation failed requestId={} service={} method={}",
+                        requestId,
+                        rpcRequest == null ? null : rpcRequest.getInterfaceName(),
+                        rpcRequest == null ? null : rpcRequest.getMethodName(), e);
+                String message = RpcResponseCodeEnum.FAIL.getMessage();
+                if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+                    message += ": " + e.getMessage();
+                }
+                rpcResponse = RpcResponse.fail(RpcResponseCodeEnum.FAIL,
+                        requestId, message);
+            }
+            objectOutputStream.writeObject(rpcResponse);
             objectOutputStream.flush();
         } catch (IOException | ClassNotFoundException e) {
             log.error("occur exception:", e);

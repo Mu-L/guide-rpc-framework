@@ -11,7 +11,7 @@ import lombok.Getter;
 @Getter
 public enum SerializationTypeEnum {
 
-    KYRO((byte) 0x01, "kyro"),
+    KRYO((byte) 0x01, "kryo"),
     PROTOSTUFF((byte) 0x02, "protostuff"),
     HESSIAN((byte) 0X03, "hessian");
 
@@ -24,7 +24,16 @@ public enum SerializationTypeEnum {
                 return c.name;
             }
         }
-        return null;
+        throw new IllegalArgumentException("Unknown serialization type code: " + (code & 0xFF));
+    }
+
+    public static SerializationTypeEnum fromName(String name) {
+        for (SerializationTypeEnum type : SerializationTypeEnum.values()) {
+            if (type.getName().equalsIgnoreCase(name)) {
+                return type;
+            }
+        }
+        throw new IllegalArgumentException("Unknown serialization type: " + name);
     }
 
 }

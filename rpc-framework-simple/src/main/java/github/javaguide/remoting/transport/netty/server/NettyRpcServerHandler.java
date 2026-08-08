@@ -1,8 +1,6 @@
 package github.javaguide.remoting.transport.netty.server;
 
-import github.javaguide.enums.CompressTypeEnum;
 import github.javaguide.enums.RpcResponseCodeEnum;
-import github.javaguide.enums.SerializationTypeEnum;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.remoting.constants.RpcConstants;
 import github.javaguide.remoting.dto.RpcMessage;
@@ -10,13 +8,22 @@ import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.handler.RpcRequestHandler;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.util.Attribute;
+import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.EventExecutorGroup;
+import io.netty.util.concurrent.ImmediateEventExecutor;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.Objects;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Customize the ChannelHandler of the server to process the data sent by the client.
@@ -28,46 +35,100 @@ import lombok.extern.slf4j.Slf4j;
  * @createTime 2020年05月25日 20:44:00
  */
 @Slf4j
+@ChannelHandler.Sharable
 public class NettyRpcServerHandler extends ChannelInboundHandlerAdapter {
 
+    private static final AttributeKey<EventExecutor> SERVICE_EXECUTOR_KEY =
+            AttributeKey.valueOf(NettyRpcServerHandler.class, "serviceExecutor");
+
     private final RpcRequestHandler rpcRequestHandler;
+    private final EventExecutorGroup serviceExecutorGroup;
 
     public NettyRpcServerHandler() {
+        this(ImmediateEventExecutor.INSTANCE);
+    }
+
+    NettyRpcServerHandler(EventExecutorGroup serviceExecutorGroup) {
         this.rpcRequestHandler = SingletonFactory.getInstance(RpcRequestHandler.class);
+        this.serviceExecutorGroup = Objects.requireNonNull(
+                serviceExecutorGroup, "Service executor group cannot be null");
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         try {
-            if (msg instanceof RpcMessage) {
-                log.info("server receive msg: [{}] ", msg);
-                byte messageType = ((RpcMessage) msg).getMessageType();
-                RpcMessage rpcMessage = new RpcMessage();
-                rpcMessage.setCodec(SerializationTypeEnum.HESSIAN.getCode());
-                rpcMessage.setCompress(CompressTypeEnum.GZIP.getCode());
-                if (messageType == RpcConstants.HEARTBEAT_REQUEST_TYPE) {
-                    rpcMessage.setMessageType(RpcConstants.HEARTBEAT_RESPONSE_TYPE);
-                    rpcMessage.setData(RpcConstants.PONG);
-                } else {
-                    RpcRequest rpcRequest = (RpcRequest) ((RpcMessage) msg).getData();
-                    // Execute the target method (the method the client needs to execute) and return the method result
-                    Object result = rpcRequestHandler.handle(rpcRequest);
-                    log.info(String.format("server get result: %s", result.toString()));
-                    rpcMessage.setMessageType(RpcConstants.RESPONSE_TYPE);
-                    if (ctx.channel().isActive() && ctx.channel().isWritable()) {
-                        RpcResponse<Object> rpcResponse = RpcResponse.success(result, rpcRequest.getRequestId());
-                        rpcMessage.setData(rpcResponse);
-                    } else {
-                        RpcResponse<Object> rpcResponse = RpcResponse.fail(RpcResponseCodeEnum.FAIL);
-                        rpcMessage.setData(rpcResponse);
-                        log.error("not writable now, message dropped");
-                    }
-                }
-                ctx.writeAndFlush(rpcMessage).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            if (!(msg instanceof RpcMessage)) {
+                throw new IllegalArgumentException("Unsupported inbound message: " + msg);
             }
+            RpcMessage requestMessage = (RpcMessage) msg;
+            log.info("Received RPC message type={} wireRequestId={}",
+                    requestMessage.getMessageType(), requestMessage.getRequestId());
+            RpcMessage responseMessage = RpcMessage.builder()
+                    .codec(requestMessage.getCodec())
+                    .compress(requestMessage.getCompress())
+                    .requestId(requestMessage.getRequestId())
+                    .build();
+            if (requestMessage.getMessageType() == RpcConstants.HEARTBEAT_REQUEST_TYPE) {
+                responseMessage.setMessageType(RpcConstants.HEARTBEAT_RESPONSE_TYPE);
+                responseMessage.setData(RpcConstants.PONG);
+            } else if (requestMessage.getMessageType() == RpcConstants.REQUEST_TYPE) {
+                responseMessage.setMessageType(RpcConstants.RESPONSE_TYPE);
+                dispatchRequest(ctx, responseMessage, (RpcRequest) requestMessage.getData());
+                return;
+            } else {
+                throw new IllegalArgumentException(
+                        "Server cannot handle message type: " + requestMessage.getMessageType());
+            }
+            ctx.writeAndFlush(responseMessage).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
         } finally {
             //Ensure that ByteBuf is released, otherwise there may be memory leaks
             ReferenceCountUtil.release(msg);
+        }
+    }
+
+    private void dispatchRequest(ChannelHandlerContext ctx, RpcMessage responseMessage,
+                                 RpcRequest rpcRequest) {
+        try {
+            serviceExecutor(ctx).execute(() -> {
+                responseMessage.setData(handleRequest(rpcRequest));
+                ctx.writeAndFlush(responseMessage)
+                        .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            });
+        } catch (RejectedExecutionException e) {
+            log.warn("RPC service executor rejected request requestId={}",
+                    rpcRequest == null ? null : rpcRequest.getRequestId(), e);
+            ctx.close();
+        }
+    }
+
+    private EventExecutor serviceExecutor(ChannelHandlerContext ctx) {
+        Attribute<EventExecutor> attribute = ctx.channel().attr(SERVICE_EXECUTOR_KEY);
+        EventExecutor executor = attribute.get();
+        if (executor != null) {
+            return executor;
+        }
+        EventExecutor selected = serviceExecutorGroup.next();
+        EventExecutor existing = attribute.setIfAbsent(selected);
+        return existing == null ? selected : existing;
+    }
+
+    private RpcResponse<Object> handleRequest(RpcRequest rpcRequest) {
+        String requestId = rpcRequest == null ? null : rpcRequest.getRequestId();
+        try {
+            Object result = rpcRequestHandler.handle(rpcRequest);
+            log.info("Completed RPC request requestId={}", requestId);
+            return RpcResponse.success(result, requestId);
+        } catch (RuntimeException e) {
+            log.error("Remote invocation failed requestId={} service={} method={}",
+                    requestId,
+                    rpcRequest == null ? null : rpcRequest.getInterfaceName(),
+                    rpcRequest == null ? null : rpcRequest.getMethodName(), e);
+            String message = RpcResponseCodeEnum.FAIL.getMessage();
+            if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+                message += ": " + e.getMessage();
+            }
+            return RpcResponse.fail(RpcResponseCodeEnum.FAIL,
+                    requestId, message);
         }
     }
 
@@ -86,8 +147,7 @@ public class NettyRpcServerHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        log.error("server catch exception");
-        cause.printStackTrace();
+        log.error("Server transport exception", cause);
         ctx.close();
     }
 }

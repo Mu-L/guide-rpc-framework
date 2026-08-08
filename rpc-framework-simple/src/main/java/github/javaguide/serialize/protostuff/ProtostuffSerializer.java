@@ -24,12 +24,16 @@ public class ProtostuffSerializer implements Serializer {
 
     @Override
     public byte[] serialize(Object obj) {
-        Class<?> clazz = obj.getClass();
-        Schema schema = RuntimeSchema.getSchema(clazz);
+        return serialize(obj, obj.getClass());
+    }
+
+    private <T> byte[] serialize(Object obj, Class<T> type) {
+        T value = type.cast(obj);
+        Schema<T> schema = RuntimeSchema.getSchema(type);
         // 每个线程第一次访问LinkedBuffer时才会创建ThreadLocal对象
         LinkedBuffer buffer = BUFFER.get();
         try {
-            return ProtostuffIOUtil.toByteArray(obj, schema, buffer);
+            return ProtostuffIOUtil.toByteArray(value, schema, buffer);
         } finally {
             buffer.clear();// 清空复用
         }

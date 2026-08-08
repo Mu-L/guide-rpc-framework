@@ -1,6 +1,12 @@
 package github.javaguide.config;
 
+import github.javaguide.enums.RpcErrorMessageEnum;
+import github.javaguide.exception.RpcException;
+import github.javaguide.utils.StringUtil;
+import github.javaguide.utils.RpcServiceNameBuilder;
 import lombok.*;
+
+import java.util.Objects;
 
 /**
  * @author shuang.kou
@@ -16,10 +22,12 @@ public class RpcServiceConfig {
     /**
      * service version
      */
+    @Builder.Default
     private String version = "";
     /**
      * when the interface has multiple implementation classes, distinguish by group
      */
+    @Builder.Default
     private String group = "";
 
     /**
@@ -27,11 +35,25 @@ public class RpcServiceConfig {
      */
     private Object service;
 
+    /**
+     * Explicit interface name used when the runtime service is wrapped by a proxy.
+     */
+    private String serviceName;
+
     public String getRpcServiceName() {
-        return this.getServiceName() + this.getGroup() + this.getVersion();
+        return RpcServiceNameBuilder.build(
+                this.getServiceName(), this.getGroup(), this.getVersion());
     }
 
     public String getServiceName() {
-        return this.service.getClass().getInterfaces()[0].getCanonicalName();
+        if (!StringUtil.isBlank(serviceName)) {
+            return serviceName;
+        }
+        Object targetService = Objects.requireNonNull(service, "service cannot be null");
+        Class<?>[] interfaces = targetService.getClass().getInterfaces();
+        if (interfaces.length == 0) {
+            throw new RpcException(RpcErrorMessageEnum.SERVICE_NOT_IMPLEMENT_ANY_INTERFACE);
+        }
+        return interfaces[0].getCanonicalName();
     }
 }

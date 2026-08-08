@@ -40,9 +40,31 @@ public class ZkServiceDiscoveryImpl implements ServiceDiscovery {
         // load balancing
         String targetServiceUrl = loadBalance.selectServiceAddress(serviceUrlList, rpcRequest);
         log.info("Successfully found the service address:[{}]", targetServiceUrl);
-        String[] socketAddressArray = targetServiceUrl.split(":");
-        String host = socketAddressArray[0];
-        int port = Integer.parseInt(socketAddressArray[1]);
-        return new InetSocketAddress(host, port);
+        return parseServiceAddress(targetServiceUrl);
+    }
+
+    static InetSocketAddress parseServiceAddress(String targetServiceUrl) {
+        if (targetServiceUrl == null) {
+            throw invalidServiceAddress(null, null);
+        }
+        int portSeparator = targetServiceUrl.lastIndexOf(':');
+        if (portSeparator <= 0 || portSeparator == targetServiceUrl.length() - 1) {
+            throw invalidServiceAddress(targetServiceUrl, null);
+        }
+        String host = targetServiceUrl.substring(0, portSeparator);
+        try {
+            int port = Integer.parseInt(targetServiceUrl.substring(portSeparator + 1));
+            if (port < 1 || port > 65_535) {
+                throw new IllegalArgumentException("port out of range");
+            }
+            return new InetSocketAddress(host, port);
+        } catch (IllegalArgumentException e) {
+            throw invalidServiceAddress(targetServiceUrl, e);
+        }
+    }
+
+    private static RpcException invalidServiceAddress(String address, Throwable cause) {
+        return new RpcException("Invalid service address: " + address,
+                cause == null ? new IllegalArgumentException(String.valueOf(address)) : cause);
     }
 }

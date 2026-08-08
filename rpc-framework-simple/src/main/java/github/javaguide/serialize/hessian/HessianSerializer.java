@@ -24,7 +24,7 @@ public class HessianSerializer implements Serializer {
 
             return byteArrayOutputStream.toByteArray();
         } catch (Exception e) {
-            throw new SerializeException("Serialization failed");
+            throw new SerializeException("Serialization failed", e);
         }
 
     }
@@ -39,7 +39,7 @@ public class HessianSerializer implements Serializer {
             return clazz.cast(o);
 
         } catch (Exception e) {
-            throw new SerializeException("Deserialization failed");
+            throw new SerializeException("Deserialization failed", e);
         }
 
     }

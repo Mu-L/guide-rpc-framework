@@ -1,75 +1,74 @@
 package github.javaguide.factory;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Queue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * @author: Zekun Fu
- * @date: 2025/5/10 21:37
- * @Description:
- */
-@Slf4j
-public class SingleTonFactoryTest {
-    public static Queue<SingletonBean> beans = new LinkedBlockingQueue<>();
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
-
+class SingletonFactoryTest {
 
     @Test
-    public void test() {
-        SingletonBean beanOnly = SingletonFactory.getInstance(
-                        ()-> SingletonBean.builder().msg("你好fzk").build(),
-                        SingletonBean.class);
-        Thread[] threads = new Thread[10];
-        for (int i = 0; i < 10; i++) {
-            // 开启十个线程，创建单例的对象，存储到beans中，结果beans中所有对象的hash值应该一致，并且msg都是你好fzk
-            threads[i] = new Thread(new SingletonBean());
+    void shouldCreateOnlyOneInstanceWhenCalledConcurrently() throws InterruptedException {
+        int threadCount = 32;
+        AtomicInteger constructorCalls = new AtomicInteger();
+        Queue<TestSingleton> instances = new ConcurrentLinkedQueue<>();
+        CountDownLatch ready = new CountDownLatch(threadCount);
+        CountDownLatch start = new CountDownLatch(1);
+        Thread[] threads = new Thread[threadCount];
+
+        for (int i = 0; i < threadCount; i++) {
+            threads[i] = new Thread(() -> {
+                ready.countDown();
+                try {
+                    start.await();
+                    instances.add(SingletonFactory.getInstance(() -> {
+                        constructorCalls.incrementAndGet();
+                        return new TestSingleton();
+                    }, TestSingleton.class));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
             threads[i].start();
         }
-        try {
-            for (int i = 0; i < 10; i++) {
-                // 等待10个线程运行完成
-                threads[i].join();
-                log.info("第{}线程运行完成", i);
-            }
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+
+        ready.await();
+        start.countDown();
+        for (Thread thread : threads) {
+            thread.join();
         }
-        log.info("共计创建{}对象", beans.size());
-        for (SingletonBean bean: beans) {
-            log.info("对象的hash为:{}, 消息为:{}", bean.hashCode(), bean.getMsg());
-            assert bean.hashCode() == beanOnly.hashCode();
-            assert bean.getMsg().equals(beanOnly.getMsg());
+
+        TestSingleton expected = instances.peek();
+        assertEquals(1, constructorCalls.get());
+        assertEquals(threadCount, instances.size());
+        instances.forEach(instance -> assertSame(expected, instance));
+    }
+
+    @Test
+    void shouldAllowNestedSingletonCreation() {
+        OuterSingleton outer = SingletonFactory.getInstance(
+                () -> new OuterSingleton(SingletonFactory.getInstance(InnerSingleton.class)),
+                OuterSingleton.class);
+
+        assertSame(SingletonFactory.getInstance(InnerSingleton.class), outer.inner);
+    }
+
+    private static final class TestSingleton {
+    }
+
+    private static final class OuterSingleton {
+        private final InnerSingleton inner;
+
+        private OuterSingleton(InnerSingleton inner) {
+            this.inner = inner;
         }
     }
 
-}
-
-@Slf4j
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-class SingletonBean implements Runnable {
-
-    private String msg;
-    @Override
-    public void run() {
-        // 创建一个Singleton对象,存访到类的数组里面
-        log.info("开始创建对象");
-        SingleTonFactoryTest.beans.add(SingletonFactory.getInstance(
-                ()-> SingletonBean.builder().msg("你好fzk").build(),
-                SingletonBean.class));
-        SingleTonFactoryTest.beans.add(SingletonFactory.getInstance((bean)-> bean.setMsg("你好fjh"),
-                SingletonBean.class));
-        SingletonBean bean = SingletonFactory.getInstance(SingletonBean.class);
-        SingleTonFactoryTest.beans.add(bean);
-        bean.setMsg("你好中国");
+    private static final class InnerSingleton {
     }
 }

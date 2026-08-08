@@ -1,6 +1,7 @@
 package github.javaguide.compress.gzip;
 
 import github.javaguide.compress.Compress;
+import github.javaguide.remoting.constants.RpcConstants;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -44,6 +45,11 @@ public class GzipCompress implements Compress {
             byte[] buffer = new byte[BUFFER_SIZE];
             int n;
             while ((n = gunzip.read(buffer)) > -1) {
+                if (out.size() > RpcConstants.MAX_DECOMPRESSED_BODY_LENGTH - n) {
+                    throw new IllegalArgumentException(
+                            "Decompressed body exceeds "
+                                    + RpcConstants.MAX_DECOMPRESSED_BODY_LENGTH + " bytes");
+                }
                 out.write(buffer, 0, n);
             }
             return out.toByteArray();

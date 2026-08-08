@@ -1,10 +1,11 @@
-package github.javaguide.serialize.kyro;
+package github.javaguide.serialize.kryo;
 
 import github.javaguide.remoting.dto.RpcRequest;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class KryoSerializerTest {
@@ -25,5 +26,7 @@ class KryoSerializerTest {
         assertEquals(target.getGroup(), actual.getGroup());
         assertEquals(target.getVersion(), actual.getVersion());
         assertEquals(target.getRequestId(), actual.getRequestId());
+        assertArrayEquals(target.getParameters(), actual.getParameters());
+        assertArrayEquals(target.getParamTypes(), actual.getParamTypes());
     }
 }

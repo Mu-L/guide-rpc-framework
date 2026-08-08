@@ -2,6 +2,7 @@ package github.javaguide.remoting.transport.netty.server;
 
 import github.javaguide.config.CustomShutdownHook;
 import github.javaguide.config.RpcServiceConfig;
+import github.javaguide.config.RpcServerAddressUtil;
 import github.javaguide.factory.SingletonFactory;
 import github.javaguide.provider.ServiceProvider;
 import github.javaguide.provider.impl.ZkServiceProviderImpl;
@@ -11,18 +12,17 @@ import github.javaguide.utils.RuntimeUtil;
 import github.javaguide.utils.concurrent.threadpool.ThreadPoolFactoryUtil;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
-import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -41,15 +41,17 @@ public class NettyRpcServer {
     private final ServiceProvider serviceProvider = SingletonFactory.getInstance(ZkServiceProviderImpl.class);
 
     public void registerService(RpcServiceConfig rpcServiceConfig) {
-        serviceProvider.publishService(rpcServiceConfig);
+        serviceProvider.addService(rpcServiceConfig);
     }
 
-    @SneakyThrows
     public void start() {
         CustomShutdownHook.getCustomShutdownHook().clearAll();
-        String host = InetAddress.getLocalHost().getHostAddress();
-        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
-        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        String host = RpcServerAddressUtil.getBindHost();
+        InetSocketAddress publishedAddress = null;
+        EventLoopGroup bossGroup = new MultiThreadIoEventLoopGroup(
+                1, NioIoHandler.newFactory());
+        EventLoopGroup workerGroup = new MultiThreadIoEventLoopGroup(
+                NioIoHandler.newFactory());
         DefaultEventExecutorGroup serviceHandlerGroup = new DefaultEventExecutorGroup(
                 RuntimeUtil.cpus() * 2,
                 ThreadPoolFactoryUtil.createThreadFactory("service-handler-group", false)
@@ -58,7 +60,8 @@ public class NettyRpcServer {
             ServerBootstrap b = new ServerBootstrap();
             // channel间可以共享的handler
             RpcMessageCodec rpcMessageCodec = new RpcMessageCodec();
-            NettyRpcServerHandler nettyRpcServerHandler = new NettyRpcServerHandler();
+            NettyRpcServerHandler nettyRpcServerHandler =
+                    new NettyRpcServerHandler(serviceHandlerGroup);
             b.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     // TCP默认开启了 Nagle 算法，该算法的作用是尽可能的发送大数据快，减少网络传输。TCP_NODELAY 参数的作用就是控制是否启用 Nagle 算法。
@@ -80,21 +83,27 @@ public class NettyRpcServer {
                             // RPCMessage       编解码器
                             p.addLast(rpcMessageCodec);
                             // 可共享的 serverHandler
-                            p.addLast(serviceHandlerGroup, nettyRpcServerHandler);
+                            p.addLast(nettyRpcServerHandler);
                         }
                     });
 
             // 绑定端口，同步等待绑定成功
             ChannelFuture f = b.bind(host, PORT).sync();
+            publishedAddress = RpcServerAddressUtil.getServerAddress(PORT);
+            serviceProvider.publishAllServices(publishedAddress);
             // 等待服务端监听端口关闭
             f.channel().closeFuture().sync();
         } catch (InterruptedException e) {
-            log.error("occur exception when start server:", e);
+            Thread.currentThread().interrupt();
+            log.warn("RPC server thread was interrupted", e);
         } finally {
-            log.error("shutdown bossGroup and workerGroup");
-            bossGroup.shutdownGracefully();
-            workerGroup.shutdownGracefully();
-            serviceHandlerGroup.shutdownGracefully();
+            log.info("shutdown bossGroup, workerGroup and serviceHandlerGroup");
+            bossGroup.shutdownGracefully().syncUninterruptibly();
+            workerGroup.shutdownGracefully().syncUninterruptibly();
+            serviceHandlerGroup.shutdownGracefully().syncUninterruptibly();
+            if (publishedAddress != null) {
+                CustomShutdownHook.getCustomShutdownHook().clearRegistry(publishedAddress);
+            }
         }
     }
 

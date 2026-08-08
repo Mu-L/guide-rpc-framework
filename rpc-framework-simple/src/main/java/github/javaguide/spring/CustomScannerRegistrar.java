@@ -9,8 +9,10 @@ import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
 import org.springframework.core.annotation.AnnotationAttributes;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.type.AnnotationMetadata;
-import org.springframework.core.type.StandardAnnotationMetadata;
 import org.springframework.stereotype.Component;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * scan and filter specified annotations
@@ -40,7 +42,10 @@ public class CustomScannerRegistrar implements ImportBeanDefinitionRegistrar, Re
             rpcScanBasePackages = rpcScanAnnotationAttributes.getStringArray(BASE_PACKAGE_ATTRIBUTE_NAME);
         }
         if (rpcScanBasePackages.length == 0) {
-            rpcScanBasePackages = new String[]{((StandardAnnotationMetadata) annotationMetadata).getIntrospectedClass().getPackage().getName()};
+            String importingClassName = annotationMetadata.getClassName();
+            int packageSeparator = importingClassName.lastIndexOf('.');
+            rpcScanBasePackages = new String[]{packageSeparator < 0
+                    ? "" : importingClassName.substring(0, packageSeparator)};
         }
         // Scan the RpcService annotation
         CustomScanner rpcServiceScanner = new CustomScanner(beanDefinitionRegistry, RpcService.class);
@@ -50,7 +55,11 @@ public class CustomScannerRegistrar implements ImportBeanDefinitionRegistrar, Re
             rpcServiceScanner.setResourceLoader(resourceLoader);
             springBeanScanner.setResourceLoader(resourceLoader);
         }
-        int springBeanAmount = springBeanScanner.scan(SPRING_BEAN_BASE_PACKAGE);
+        Set<String> componentPackages = new LinkedHashSet<>();
+        componentPackages.add(SPRING_BEAN_BASE_PACKAGE);
+        java.util.Collections.addAll(componentPackages, rpcScanBasePackages);
+        int springBeanAmount = springBeanScanner.scan(
+                componentPackages.toArray(new String[0]));
         log.info("springBeanScanner扫描的数量 [{}]", springBeanAmount);
         int rpcServiceCount = rpcServiceScanner.scan(rpcScanBasePackages);
         log.info("rpcServiceScanner扫描的数量 [{}]", rpcServiceCount);

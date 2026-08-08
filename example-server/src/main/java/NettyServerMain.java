@@ -18,10 +18,12 @@ public class NettyServerMain {
     }
 
     public static void autoRegistry() {
-        AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(NettyServerMain.class);
-        NettyRpcServer nettyRpcServer = (NettyRpcServer) applicationContext.getBean("nettyRpcServer");
-        HelloService helloService = applicationContext.getBean(HelloServiceImpl.class);
-        helloService.hello(new Hello("你好fzk", "你好服务端"));
-        nettyRpcServer.start();
+        try (AnnotationConfigApplicationContext applicationContext =
+                     new AnnotationConfigApplicationContext(NettyServerMain.class)) {
+            NettyRpcServer nettyRpcServer = applicationContext.getBean(NettyRpcServer.class);
+            HelloService helloService = applicationContext.getBean(HelloServiceImpl.class);
+            helloService.hello(new Hello("你好fzk", "你好服务端"));
+            nettyRpcServer.start();
+        }
     }
 }

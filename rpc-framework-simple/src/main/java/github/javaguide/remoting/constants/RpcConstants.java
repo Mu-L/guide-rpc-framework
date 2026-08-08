@@ -28,5 +28,7 @@ public class RpcConstants {
     public static final String PING = "ping";
     public static final String PONG = "pong";
     public static final int MAX_FRAME_LENGTH = 8 * 1024 * 1024;
+    public static final int MAX_DECOMPRESSED_BODY_LENGTH = 8 * 1024 * 1024;
+    public static final long RPC_REQUEST_TIMEOUT_MILLIS = 10_000L;
 
 }

@@ -1,13 +1,20 @@
 package github.javaguide.loadbalance.loadbalancer;
 
-import github.javaguide.factory.SingletonFactory;
 import github.javaguide.loadbalance.AbstractLoadBalance;
 import github.javaguide.remoting.dto.RpcRequest;
 import lombok.extern.slf4j.Slf4j;
 
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -25,33 +32,23 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
     private final ConcurrentHashMap<String, ConsistentHashingLoadBalancer> selectors = new ConcurrentHashMap<>();
 
     // 重构次数，测试使用
-    public static AtomicInteger count = new AtomicInteger();
+    public static final AtomicInteger count = new AtomicInteger();
 
     // 创建次数，测试使用
-    public static AtomicInteger createCount = new AtomicInteger();
+    public static final AtomicInteger createCount = new AtomicInteger();
 
 
     @Override
     protected String doSelect(List<String> serviceAddresses, RpcRequest rpcRequest) {
         String rpcServiceName = rpcRequest.getRpcServiceName();
-        // 1. 获取hash选择器
-        ConsistentHashingLoadBalancer selector = selectors.get(rpcServiceName);
-        if (selector == null) {
-            // 2. 如果没有，就新建hash环，使用单例工厂模式进行创建
-            selector = SingletonFactory.getInstance(()-> new ConsistentHashingLoadBalancer(
-                    serviceAddresses,
-                    160,
-                    new ConsistentHashingLoadBalancer.MD5HashFunction()), ConsistentHashingLoadBalancer.class);
-            selectors.put(rpcServiceName, selector);
-
-        }
-        else if (selector.hasChanged(serviceAddresses)) {
-            // 3. 如果地址变换了，就重构hash环
-            selector = selectors.get(rpcServiceName);
+        ConsistentHashingLoadBalancer selector = selectors.computeIfAbsent(rpcServiceName,
+                key -> new ConsistentHashingLoadBalancer(serviceAddresses, 160,
+                        new ConsistentHashingLoadBalancer.MD5HashFunction()));
+        if (selector.hasChanged(serviceAddresses)) {
             selector.reBuild(serviceAddresses);
         }
-        // 使用请求的uuid进行hash
-        return selector.selectNode(rpcServiceName + rpcRequest.getRequestId());
+        return selector.selectNode(
+                rpcServiceName + Arrays.deepToString(rpcRequest.getParameters()));
     }
 
 
@@ -76,35 +73,25 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
         private final HashFunction hashFunction;
 
         /**
-         * 防止使用了没有初始化完成的选择器
-         * */
-        private volatile boolean initFlag = false;
-//        private long identityCode;
-        /**
          * 构造函数，在初始化的时候，就需要进行hash环的构建了
          * */
         public ConsistentHashingLoadBalancer(List<String> invokers,
                                              int virtualNodeCount,
                                              HashFunction hashFunction) {
-//            count.getAndIncrement();
             log.info("创建服务的选择器");
-            this.initFlag = false;
             this.virtualNodeCount = virtualNodeCount;
             this.hashFunction = hashFunction;
             // 1. 构建hash环
             for (String addr : invokers) {
                 this.addNode(addr);
             }
-//            this.identityCode = this.physicalNodes.hashCode();
-            // 2. 初始化完成，可以使用了
-            this.initFlag = true;
             createCount.getAndIncrement();
         }
 
         /**
          * 判断地址列表是否已经发生了变化，不用加上锁
          * */
-        public boolean hasChanged(List<String> address) {
+        public synchronized boolean hasChanged(List<String> address) {
             if (address.size() != this.physicalNodes.size()) {
                 return true;
             }
@@ -119,10 +106,7 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
         /**
          * 根据请求的key选择节点
          */
-        public String selectNode(String key) {
-            while (!initFlag) {
-                // 没有初始化完成，直接死循环等待就行了，不要上下文切换，浪费时间
-            }
+        public synchronized String selectNode(String key) {
             if (virtualNodes.isEmpty()) {
                 return null;
             }
@@ -139,11 +123,7 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
 
 
         public synchronized void reBuild(List<String> address) {
-            // 0.1 重新初始化，防止其他线程获取
-            this.initFlag = false;
-            // 0.2 首先重新计算一遍，当前的结点是否已经重构了，如果没有线程重构，在进行重构。双检测锁
             if (!this.hasChanged(address)) {
-                this.initFlag = true;
                 return ;
             }
 
@@ -174,9 +154,6 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
                 this.addNode(a);
             }
 
-            // 2. 变量赋值
-            this.initFlag = true;
-//            this.identityCode = this.physicalNodes.hashCode();
             log.info("重新构建的列表大小:{}", this.physicalNodes.size());
         }
 
@@ -216,10 +193,7 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
         /**
          * 获取所有物理节点
          */
-        public List<String> getAllNodes() {
-            while (!initFlag) {
-                // 获取结点前，首先保证初始化完成了
-            }
+        public synchronized List<String> getAllNodes() {
             return Collections.unmodifiableList(new ArrayList<>(physicalNodes));
         }
 
@@ -238,7 +212,7 @@ public class ConsistentHashLoadBalanceNew extends AbstractLoadBalance {
             public long hash(String key) {
                 try {
                     MessageDigest md5 = MessageDigest.getInstance("MD5");
-                    byte[] digest = md5.digest(key.getBytes());
+                    byte[] digest = md5.digest(key.getBytes(StandardCharsets.UTF_8));
 
                     // 取前8字节作为long类型的哈希值
                     return ((long) (digest[0] & 0xFF) << 56) |

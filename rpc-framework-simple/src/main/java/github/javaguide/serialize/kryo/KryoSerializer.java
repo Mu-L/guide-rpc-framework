@@ -1,12 +1,12 @@
-package github.javaguide.serialize.kyro;
+package github.javaguide.serialize.kryo;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
+import github.javaguide.exception.SerializeException;
 import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.serialize.Serializer;
-import lombok.extern.slf4j.Slf4j;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -17,7 +17,6 @@ import java.io.ByteArrayOutputStream;
  * @author shuang.kou
  * @createTime 2020年05月13日 19:29:00
  */
-@Slf4j
 public class KryoSerializer implements Serializer {
 
     /**
@@ -25,6 +24,12 @@ public class KryoSerializer implements Serializer {
      */
     private final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(() -> {
         Kryo kryo = new Kryo();
+        // RPC parameters and return values are application-defined types. Requiring every
+        // consumer and provider to register the same complete class list would make this
+        // generic serializer unusable and would break existing services after Kryo 5 changed
+        // its default. Registered framework DTOs retain stable compact IDs; user DTOs carry
+        // their class metadata on the wire.
+        kryo.setRegistrationRequired(false);
         kryo.register(RpcResponse.class);
         kryo.register(RpcRequest.class);
         return kryo;
@@ -40,7 +45,6 @@ public class KryoSerializer implements Serializer {
             output.flush();
             return byteArrayOutputStream.toByteArray();
         } catch (Exception e) {
-            log.error("Serialization failed", e);
             throw new SerializeException("Serialization failed", e);
         }
     }
@@ -53,19 +57,7 @@ public class KryoSerializer implements Serializer {
             // byte->Object:从byte数组中反序列化出对对象
             return kryo.readObject(input, clazz);
         } catch (Exception e) {
-            log.error("Deserialization failed", e);
             throw new SerializeException("Deserialization failed", e);
         }
     }
-
-    public class SerializeException extends RuntimeException {
-        public SerializeException(String message) {
-            super(message);
-        }
-
-        public SerializeException(String message, Throwable cause) {
-            super(message, cause);
-        }
-    }
-
 }

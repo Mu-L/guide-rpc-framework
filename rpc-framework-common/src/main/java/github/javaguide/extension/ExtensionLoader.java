@@ -34,20 +34,20 @@ public final class ExtensionLoader<T> {
      * */
 //    private static final Map<Class<?>, Object> EXTENSION_INSTANCES = new ConcurrentHashMap<>();
 
-    private final Class<?> type;
+    private final Class<T> type;
 
     /**
      * 实力缓存，根据名字进行缓存
      * 保证可见性的 Holder。
      * */
-    private final Map<String, Holder<Object>> cachedInstances = new ConcurrentHashMap<>();
+    private final Map<String, Holder<T>> cachedInstances = new ConcurrentHashMap<>();
 
     /**
      * 类缓存，根据名称进行缓存，从文件中进行读取的key，value
      * */
-    private final Holder<Map<String, Class<?>>> cachedClasses = new Holder<>();
+    private final Holder<Map<String, Class<? extends T>>> cachedClasses = new Holder<>();
 
-    private ExtensionLoader(Class<?> type) {
+    private ExtensionLoader(Class<T> type) {
         this.type = type;
     }
 
@@ -66,13 +66,10 @@ public final class ExtensionLoader<T> {
             // 类上需要包含SPI注解
             throw new IllegalArgumentException("Extension type must be annotated by @SPI");
         }
-        // 创建类加载器，直接就是使用ConcurrentHashMap进行创建的，每一个类有一个自己的类加载器
-        ExtensionLoader<S> extensionLoader = (ExtensionLoader<S>) EXTENSION_LOADERS.get(type);
-        if (extensionLoader == null) {
-            EXTENSION_LOADERS.putIfAbsent(type, new ExtensionLoader<S>(type));
-            extensionLoader = (ExtensionLoader<S>) EXTENSION_LOADERS.get(type);
-        }
-
+        // The map key and loader type are created from the same Class instance, so this cast is safe.
+        @SuppressWarnings("unchecked")
+        ExtensionLoader<S> extensionLoader = (ExtensionLoader<S>) EXTENSION_LOADERS.computeIfAbsent(
+                type, ignored -> new ExtensionLoader<>(type));
         return extensionLoader;
     }
 
@@ -81,13 +78,13 @@ public final class ExtensionLoader<T> {
             throw new IllegalArgumentException("Extension name should not be null or empty.");
         }
         // 创建一个对象，如果没有的情况下，创建一个新的
-        Holder<Object> holder = cachedInstances.get(name);
+        Holder<T> holder = cachedInstances.get(name);
         if (holder == null) {
             cachedInstances.putIfAbsent(name, new Holder<>());
             holder = cachedInstances.get(name);
         }
         // 单例模式创建对象，双检测锁。没有只是使用ConcurrentHashMap
-        Object instance = holder.get();
+        T instance = holder.get();
         if (instance == null) {
             synchronized (holder) {
                 instance = holder.get();
@@ -97,7 +94,7 @@ public final class ExtensionLoader<T> {
                 }
             }
         }
-        return (T) instance;
+        return instance;
     }
 
     /**
@@ -105,17 +102,17 @@ public final class ExtensionLoader<T> {
      * */
     private T createExtension(String name) {
         // 1. 首先获取扩展类加载器
-        Class<?> clazz = getExtensionClasses().get(name);
+        Class<? extends T> clazz = getExtensionClasses().get(name);
         if (clazz == null) {
             throw new RuntimeException("扩展类不存在:  " + name);
         }
         // 2. 获取实例
-        return (T) SingletonFactory.getInstance(clazz);
+        return SingletonFactory.getInstance(clazz);
     }
 
-    private Map<String, Class<?>> getExtensionClasses() {
+    private Map<String, Class<? extends T>> getExtensionClasses() {
         // 1. 从缓存中获取所有的类
-        Map<String, Class<?>> classes = cachedClasses.get();
+        Map<String, Class<? extends T>> classes = cachedClasses.get();
         // 2. 缓存中没有，进行双检测锁
         if (classes == null) {
             synchronized (cachedClasses) {
@@ -134,13 +131,16 @@ public final class ExtensionLoader<T> {
     /**
      * java的SPI机制
      * */
-    private void loadDirectory(Map<String, Class<?>> extensionClasses) {
+    private void loadDirectory(Map<String, Class<? extends T>> extensionClasses) {
         // 1. 构建配置文件的路径
         String fileName = ExtensionLoader.SERVICE_DIRECTORY + type.getName();
         try {
             Enumeration<URL> urls;
             // 2. Java的SPI，扩展类加载器，然后设置文件的URl
-            ClassLoader classLoader = ExtensionLoader.class.getClassLoader();
+            ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+            if (classLoader == null) {
+                classLoader = ExtensionLoader.class.getClassLoader();
+            }
             urls = classLoader.getResources(fileName);
             if (urls != null) {
                 while (urls.hasMoreElements()) {
@@ -150,11 +150,12 @@ public final class ExtensionLoader<T> {
                 }
             }
         } catch (IOException e) {
-            log.error(e.getMessage());
+            throw new IllegalStateException("Failed to load SPI resource " + fileName, e);
         }
     }
 
-    private void loadResource(Map<String, Class<?>> extensionClasses, ClassLoader classLoader, URL resourceUrl) {
+    private void loadResource(Map<String, Class<? extends T>> extensionClasses,
+                              ClassLoader classLoader, URL resourceUrl) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(resourceUrl.openStream(), UTF_8))) {
             String line;
             // 读取配置文件的没一行
@@ -167,24 +168,41 @@ public final class ExtensionLoader<T> {
                 // 2. 去掉空格
                 line = line.trim();
                 if (line.length() > 0) {
+                    // 3. = 实现的key value对解析，存入到map中
+                    final int ei = line.indexOf('=');
+                    if (ei <= 0 || ei == line.length() - 1) {
+                        throw new IllegalStateException("Malformed SPI entry '" + line
+                                + "' in " + resourceUrl);
+                    }
+                    String name = line.substring(0, ei).trim();
+                    String clazzName = line.substring(ei + 1).trim();
+                    if (name.length() == 0 || clazzName.length() == 0) {
+                        throw new IllegalStateException("Malformed SPI entry '" + line
+                                + "' in " + resourceUrl);
+                    }
                     try {
-                        // 3. = 实现的key value对解析，存入到map中
-                        final int ei = line.indexOf('=');
-                        String name = line.substring(0, ei).trim();
-                        String clazzName = line.substring(ei + 1).trim();
-                        if (name.length() > 0 && clazzName.length() > 0) {
-                            // 4. Java的SPI的具体实现
-                            Class<?> clazz = classLoader.loadClass(clazzName);
-                            extensionClasses.put(name, clazz);
+                        // 4. Java的SPI的具体实现
+                        Class<?> loadedClass = classLoader.loadClass(clazzName);
+                        if (!type.isAssignableFrom(loadedClass)) {
+                            throw new IllegalStateException(clazzName + " does not implement "
+                                    + type.getName());
+                        }
+                        Class<? extends T> implementationClass = loadedClass.asSubclass(type);
+                        Class<? extends T> previous = extensionClasses.putIfAbsent(
+                                name, implementationClass);
+                        if (previous != null && previous != implementationClass) {
+                            throw new IllegalStateException("Duplicate SPI name '" + name
+                                    + "': " + previous.getName() + " and " + clazzName);
                         }
                     } catch (ClassNotFoundException e) {
-                        log.error(e.getMessage());
+                        throw new IllegalStateException("SPI class not found: " + clazzName
+                                + " in " + resourceUrl, e);
                     }
                 }
 
             }
         } catch (IOException e) {
-            log.error(e.getMessage());
+            throw new IllegalStateException("Failed to read SPI resource " + resourceUrl, e);
         }
     }
 }

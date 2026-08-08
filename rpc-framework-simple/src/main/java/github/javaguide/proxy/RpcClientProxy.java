@@ -7,13 +7,14 @@ import github.javaguide.exception.RpcException;
 import github.javaguide.remoting.dto.RpcRequest;
 import github.javaguide.remoting.dto.RpcResponse;
 import github.javaguide.remoting.transport.RpcRequestTransport;
-import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 /**
  * Dynamic proxy class.
@@ -33,16 +34,27 @@ public class RpcClientProxy implements InvocationHandler {
      */
     private final RpcRequestTransport rpcRequestTransport;
     private final RpcServiceConfig rpcServiceConfig;
+    private final Class<?> serviceInterface;
 
     public RpcClientProxy(RpcRequestTransport rpcRequestTransport, RpcServiceConfig rpcServiceConfig) {
         this.rpcRequestTransport = rpcRequestTransport;
         this.rpcServiceConfig = rpcServiceConfig;
+        this.serviceInterface = null;
     }
 
 
     public RpcClientProxy(RpcRequestTransport rpcRequestTransport) {
         this.rpcRequestTransport = rpcRequestTransport;
         this.rpcServiceConfig = new RpcServiceConfig();
+        this.serviceInterface = null;
+    }
+
+    private RpcClientProxy(RpcRequestTransport rpcRequestTransport,
+                           RpcServiceConfig rpcServiceConfig,
+                           Class<?> serviceInterface) {
+        this.rpcRequestTransport = rpcRequestTransport;
+        this.rpcServiceConfig = rpcServiceConfig;
+        this.serviceInterface = serviceInterface;
     }
 
     /**
@@ -50,29 +62,57 @@ public class RpcClientProxy implements InvocationHandler {
      */
     @SuppressWarnings("unchecked")
     public <T> T getProxy(Class<T> clazz) {
-        return (T) Proxy.newProxyInstance(clazz.getClassLoader(), new Class<?>[]{clazz}, this);
+        if (!clazz.isInterface()) {
+            throw new IllegalArgumentException("RPC proxy type must be an interface: " + clazz.getName());
+        }
+        RpcClientProxy invocationHandler =
+                new RpcClientProxy(rpcRequestTransport, rpcServiceConfig, clazz);
+        return (T) Proxy.newProxyInstance(
+                clazz.getClassLoader(), new Class<?>[]{clazz}, invocationHandler);
     }
 
     /**
      * This method is actually called when you use a proxy object to call a method.
      * The proxy object is the object you get through the getProxy method.
      */
-    @SneakyThrows
     @SuppressWarnings("unchecked")
     @Override
-    public Object invoke(Object proxy, Method method, Object[] args) {
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        if (method.getDeclaringClass() == Object.class) {
+            return invokeObjectMethod(proxy, method, args);
+        }
         // 1. 创建一个PRC请求
         log.info("invoked method: [{}]", method.getName());
         RpcRequest rpcRequest = RpcRequest.builder().methodName(method.getName())
                 .parameters(args)
-                .interfaceName(method.getDeclaringClass().getName())
+                .interfaceName(serviceInterface == null
+                        ? method.getDeclaringClass().getCanonicalName()
+                        : serviceInterface.getCanonicalName())
                 .paramTypes(method.getParameterTypes())
                 .requestId(UUID.randomUUID().toString())
                 .group(rpcServiceConfig.getGroup())
                 .version(rpcServiceConfig.getVersion())
                 .build();
         // 2. 发送RPC请求
-        RpcResponse<Object> rpcResponse =  (RpcResponse<Object>) rpcRequestTransport.sendRpcRequest(rpcRequest);
+        Object transportResult = rpcRequestTransport.sendRpcRequest(rpcRequest);
+        RpcResponse<Object> rpcResponse;
+        if (transportResult instanceof CompletableFuture) {
+            try {
+                rpcResponse = (RpcResponse<Object>) ((CompletableFuture<?>) transportResult).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RpcException("Interrupted while waiting for RPC response "
+                        + rpcRequest.getRequestId(), e);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) {
+                    throw cause;
+                }
+                throw new RpcException("RPC request failed: " + rpcRequest.getRequestId(), cause);
+            }
+        } else {
+            rpcResponse = (RpcResponse<Object>) transportResult;
+        }
 
         this.check(rpcResponse, rpcRequest);
         return rpcResponse.getData();
@@ -88,7 +128,22 @@ public class RpcClientProxy implements InvocationHandler {
         }
 
         if (rpcResponse.getCode() == null || !rpcResponse.getCode().equals(RpcResponseCodeEnum.SUCCESS.getCode())) {
-            throw new RpcException(RpcErrorMessageEnum.SERVICE_INVOCATION_FAILURE, INTERFACE_NAME + ":" + rpcRequest.getInterfaceName());
+            throw new RpcException(RpcErrorMessageEnum.SERVICE_INVOCATION_FAILURE,
+                    INTERFACE_NAME + ":" + rpcRequest.getInterfaceName()
+                            + ", remoteMessage:" + rpcResponse.getMessage());
+        }
+    }
+
+    private Object invokeObjectMethod(Object proxy, Method method, Object[] args) {
+        switch (method.getName()) {
+            case "equals":
+                return proxy == args[0];
+            case "hashCode":
+                return System.identityHashCode(proxy);
+            case "toString":
+                return "RpcClientProxy(" + serviceInterface.getCanonicalName() + ")";
+            default:
+                throw new IllegalStateException("Unsupported Object method: " + method.getName());
         }
     }
 }

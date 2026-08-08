@@ -1,10 +1,10 @@
 package github.javaguide.utils.concurrent.threadpool;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 创建 ThreadPool(线程池) 的工具类.
@@ -36,14 +36,12 @@ public final class ThreadPoolFactoryUtil {
     }
 
     public static ExecutorService createCustomThreadPoolIfAbsent(CustomThreadPoolConfig customThreadPoolConfig, String threadNamePrefix, Boolean daemon) {
-        ExecutorService threadPool = THREAD_POOLS.computeIfAbsent(threadNamePrefix, k -> createThreadPool(customThreadPoolConfig, threadNamePrefix, daemon));
-        // 如果 threadPool 被 shutdown 的话就重新创建一个
-        if (threadPool.isShutdown() || threadPool.isTerminated()) {
-            THREAD_POOLS.remove(threadNamePrefix);
-            threadPool = createThreadPool(customThreadPoolConfig, threadNamePrefix, daemon);
-            THREAD_POOLS.put(threadNamePrefix, threadPool);
-        }
-        return threadPool;
+        return THREAD_POOLS.compute(threadNamePrefix, (key, current) -> {
+            if (current == null || current.isShutdown() || current.isTerminated()) {
+                return createThreadPool(customThreadPoolConfig, threadNamePrefix, daemon);
+            }
+            return current;
+        });
     }
 
     /**
@@ -51,16 +49,22 @@ public final class ThreadPoolFactoryUtil {
      */
     public static void shutDownAllThreadPool() {
         log.info("call shutDownAllThreadPool method");
-        THREAD_POOLS.entrySet().parallelStream().forEach(entry -> {
-            ExecutorService executorService = entry.getValue();
+        THREAD_POOLS.forEach((threadName, executorService) -> {
             executorService.shutdown();
-            log.info("shut down thread pool [{}] [{}]", entry.getKey(), executorService.isTerminated());
             try {
-                executorService.awaitTermination(10, TimeUnit.SECONDS);
+                if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                    executorService.shutdownNow();
+                    if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                        log.warn("Thread pool [{}] did not terminate", threadName);
+                    }
+                }
             } catch (InterruptedException e) {
-                log.error("Thread pool never terminated");
                 executorService.shutdownNow();
+                Thread.currentThread().interrupt();
             }
+            THREAD_POOLS.remove(threadName, executorService);
+            log.info("shut down thread pool [{}], terminated={}",
+                    threadName, executorService.isTerminated());
         });
     }
 
@@ -80,13 +84,16 @@ public final class ThreadPoolFactoryUtil {
      */
     public static ThreadFactory createThreadFactory(String threadNamePrefix, Boolean daemon) {
         if (threadNamePrefix != null) {
-            if (daemon != null) {
-                return new ThreadFactoryBuilder()
-                        .setNameFormat(threadNamePrefix + "-%d")
-                        .setDaemon(daemon).build();
-            } else {
-                return new ThreadFactoryBuilder().setNameFormat(threadNamePrefix + "-%d").build();
-            }
+            ThreadFactory defaultThreadFactory = Executors.defaultThreadFactory();
+            AtomicLong threadNumber = new AtomicLong();
+            return task -> {
+                Thread thread = defaultThreadFactory.newThread(task);
+                thread.setName(threadNamePrefix + "-" + threadNumber.getAndIncrement());
+                if (daemon != null) {
+                    thread.setDaemon(daemon);
+                }
+                return thread;
+            };
         }
         return Executors.defaultThreadFactory();
     }

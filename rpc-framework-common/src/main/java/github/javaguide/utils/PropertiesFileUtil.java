@@ -2,10 +2,9 @@ package github.javaguide.utils;
 
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 
@@ -19,19 +18,23 @@ public final class PropertiesFileUtil {
     }
 
     public static Properties readPropertiesFile(String fileName) {
-        URL url = Thread.currentThread().getContextClassLoader().getResource("");
-        String rpcConfigPath = "";
-        if (url != null) {
-            rpcConfigPath = url.getPath() + fileName;
+        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+        if (classLoader == null) {
+            classLoader = PropertiesFileUtil.class.getClassLoader();
         }
-        Properties properties = null;
-        try (InputStreamReader inputStreamReader = new InputStreamReader(
-                new FileInputStream(rpcConfigPath), StandardCharsets.UTF_8)) {
-            properties = new Properties();
+        InputStream inputStream = classLoader.getResourceAsStream(fileName);
+        if (inputStream == null) {
+            log.warn("Properties file [{}] was not found on the classpath", fileName);
+            return null;
+        }
+        try (InputStreamReader inputStreamReader =
+                     new InputStreamReader(inputStream, StandardCharsets.UTF_8)) {
+            Properties properties = new Properties();
             properties.load(inputStreamReader);
+            return properties;
         } catch (IOException e) {
-            log.error("occur exception when read properties file [{}]", fileName);
+            throw new IllegalStateException(
+                    "Failed to read properties file " + fileName, e);
         }
-        return properties;
     }
 }

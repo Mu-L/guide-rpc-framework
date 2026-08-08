@@ -22,7 +22,16 @@ public enum CompressTypeEnum {
                 return c.name;
             }
         }
-        return null;
+        throw new IllegalArgumentException("Unknown compress type code: " + (code & 0xFF));
+    }
+
+    public static CompressTypeEnum fromName(String name) {
+        for (CompressTypeEnum type : CompressTypeEnum.values()) {
+            if (type.getName().equalsIgnoreCase(name)) {
+                return type;
+            }
+        }
+        throw new IllegalArgumentException("Unknown compress type: " + name);
     }
 
 }

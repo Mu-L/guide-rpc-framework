@@ -3,7 +3,7 @@ package github.javaguide.extention;
 import github.javaguide.extension.ExtensionLoader;
 import github.javaguide.extension.SPI;
 import lombok.extern.slf4j.Slf4j;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 /**
  * @author: Zekun Fu
